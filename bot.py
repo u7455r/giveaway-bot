@@ -1,3 +1,4 @@
+import os
 import telebot
 import sqlite3
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
