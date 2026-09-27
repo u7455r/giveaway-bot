@@ -201,3 +201,5 @@ def callback_listener(call):
 
     elif call.data.startswith("del_"):
         db_id = call.data.split("_")[1]
+init_db()
+bot.infinity_polling()
