@@ -36,9 +36,11 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
 
 app = Flask(__name__)
 
+
 @app.route("/")
 def home():
     return "Giveaway Bot is running!", 200
+
 
 @app.route("/health")
 def health():
@@ -81,8 +83,145 @@ def init_db():
         )
     """)
 
+    # =========================
+    # USERS TABLE
+    # =========================
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            alert_sent INTEGER DEFAULT 0
+        )
+    """)
+
     conn.commit()
     conn.close()
+
+
+# =========================
+# USER DATABASE
+# =========================
+
+def save_user(user):
+    conn = db()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        INSERT OR IGNORE INTO users
+        (user_id, username, first_name, last_name)
+        VALUES (?, ?, ?, ?)
+    """, (
+        user.id,
+        user.username or "",
+        user.first_name or "",
+        user.last_name or ""
+    ))
+
+    cursor.execute("""
+        UPDATE users
+        SET username=?,
+            first_name=?,
+            last_name=?
+        WHERE user_id=?
+    """, (
+        user.username or "",
+        user.first_name or "",
+        user.last_name or "",
+        user.id
+    ))
+
+    conn.commit()
+    conn.close()
+
+
+def is_new_user(user_id):
+    conn = db()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "SELECT user_id FROM users WHERE user_id=?",
+        (user_id,)
+    )
+
+    result = cursor.fetchone()
+
+    conn.close()
+
+    return result is None
+
+
+def alert_already_sent(user_id):
+    conn = db()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        "SELECT alert_sent FROM users WHERE user_id=?",
+        (user_id,)
+    )
+
+    result = cursor.fetchone()
+
+    conn.close()
+
+    return bool(result and result[0] == 1)
+
+
+def mark_alert_sent(user_id):
+    conn = db()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        UPDATE users
+        SET alert_sent=1
+        WHERE user_id=?
+    """, (user_id,))
+
+    conn.commit()
+    conn.close()
+
+
+# =========================
+# NEW USER ADMIN ALERT
+# =========================
+
+def send_new_user_alert(user):
+
+    if user.id == ADMIN_ID:
+        return
+
+    if alert_already_sent(user.id):
+        return
+
+    username = f"@{user.username}" if user.username else "❌ No Username"
+
+    full_name = user.first_name or ""
+
+    if user.last_name:
+        full_name += f" {user.last_name}"
+
+    text = (
+        "🚨 *NEW USER STARTED BOT!*\n\n"
+        f"👤 Name: `{full_name}`\n"
+        f"🔗 Username: `{username}`\n"
+        f"🆔 User ID: `{user.id}`\n\n"
+        "✅ দুইটি Channel Join করা হয়েছে।\n"
+        "🎉 New user successfully registered!"
+    )
+
+    try:
+        bot.send_message(
+            ADMIN_ID,
+            text
+        )
+
+        mark_alert_sent(user.id)
+
+    except Exception:
+        pass
 
 
 # =========================
@@ -122,11 +261,16 @@ def set_user_lang(user_id, lang):
 # =========================
 
 def is_user_subscribed(user_id):
+
     try:
         member1 = bot.get_chat_member(CHANNEL_1, user_id)
         member2 = bot.get_chat_member(CHANNEL_2, user_id)
 
-        valid_status = ["creator", "administrator", "member"]
+        valid_status = [
+            "creator",
+            "administrator",
+            "member"
+        ]
 
         return (
             member1.status in valid_status and
@@ -138,6 +282,7 @@ def is_user_subscribed(user_id):
 
 
 def force_join_markup():
+
     markup = InlineKeyboardMarkup()
 
     markup.row(
@@ -165,6 +310,7 @@ def force_join_markup():
 
 
 def send_force_join(chat_id):
+
     text = (
         "🚨 *ACCESS REQUIRED*\n\n"
         "এই বট ব্যবহার করতে আগে আমাদের দুইটি চ্যানেলে Join করুন।\n\n"
@@ -183,6 +329,7 @@ def send_force_join(chat_id):
 # =========================
 
 def main_keyboard():
+
     keyboard = ReplyKeyboardMarkup(
         resize_keyboard=True
     )
@@ -205,6 +352,7 @@ def main_keyboard():
 # =========================
 
 def admin_keyboard():
+
     markup = InlineKeyboardMarkup()
 
     markup.row(
@@ -228,6 +376,51 @@ def admin_keyboard():
         )
     )
 
+    markup.row(
+        InlineKeyboardButton(
+            "📢 Broadcast",
+            callback_data="admin_broadcast"
+        )
+    )
+
+    markup.row(
+        InlineKeyboardButton(
+            "💬 Direct User Chat",
+            callback_data="admin_direct_chat"
+        )
+    )
+
+    return markup
+
+
+# =========================
+# ADMIN STATES
+# =========================
+
+admin_states = {}
+
+# Active direct chats:
+# ADMIN_ID -> USER_ID
+active_direct_chat = {}
+
+# =========================
+# BROADCAST CONTROL
+# =========================
+
+broadcast_running = False
+
+
+def broadcast_markup():
+
+    markup = InlineKeyboardMarkup()
+
+    markup.row(
+        InlineKeyboardButton(
+            "🛑 Cancel Broadcast",
+            callback_data="broadcast_cancel"
+        )
+    )
+
     return markup
 
 
@@ -240,6 +433,7 @@ def start_command(message):
 
     user_id = message.from_user.id
 
+    # ADMIN
     if user_id == ADMIN_ID:
 
         bot.send_message(
@@ -252,9 +446,17 @@ def start_command(message):
 
         return
 
+    # CHECK FORCE JOIN
     if not is_user_subscribed(user_id):
+
         send_force_join(message.chat.id)
         return
+
+    # SAVE USER
+    save_user(message.from_user)
+
+    # ADMIN ONLY NEW USER ALERT
+    send_new_user_alert(message.from_user)
 
     bot.send_message(
         message.chat.id,
@@ -274,10 +476,17 @@ def callback_handler(call):
 
     user_id = call.from_user.id
 
+    # =========================
     # VERIFY JOIN
+    # =========================
+
     if call.data == "verify_join":
 
         if is_user_subscribed(user_id):
+
+            if user_id != ADMIN_ID:
+                save_user(call.from_user)
+                send_new_user_alert(call.from_user)
 
             bot.answer_callback_query(
                 call.id,
@@ -301,7 +510,10 @@ def callback_handler(call):
 
         return
 
+    # =========================
     # ADMIN ONLY
+    # =========================
+
     if user_id != ADMIN_ID:
 
         bot.answer_callback_query(
@@ -312,7 +524,10 @@ def callback_handler(call):
 
         return
 
+    # =========================
     # ADD GIVEAWAY
+    # =========================
+
     if call.data == "admin_add":
 
         admin_states[user_id] = {
@@ -329,7 +544,10 @@ def callback_handler(call):
 
         bot.answer_callback_query(call.id)
 
+    # =========================
     # ACTIVE CODES
+    # =========================
+
     elif call.data == "admin_list":
 
         conn = db()
@@ -358,6 +576,7 @@ def callback_handler(call):
             text = "📋 *ACTIVE GIVEAWAY CODES*\n\n"
 
             for code, category, status in rows:
+
                 text += (
                     f"🔑 `{code}`\n"
                     f"📁 {category}\n"
@@ -371,7 +590,10 @@ def callback_handler(call):
 
         bot.answer_callback_query(call.id)
 
+    # =========================
     # STATISTICS
+    # =========================
+
     elif call.data == "admin_stats":
 
         conn = db()
@@ -380,17 +602,26 @@ def callback_handler(call):
         cursor.execute(
             "SELECT COUNT(*) FROM giveaways"
         )
+
         total = cursor.fetchone()[0]
 
         cursor.execute(
             "SELECT COUNT(*) FROM giveaways WHERE status='Unused'"
         )
+
         unused = cursor.fetchone()[0]
 
         cursor.execute(
             "SELECT COUNT(*) FROM giveaways WHERE status='Used'"
         )
+
         used = cursor.fetchone()[0]
+
+        cursor.execute(
+            "SELECT COUNT(*) FROM users"
+        )
+
+        users = cursor.fetchone()[0]
 
         conn.close()
 
@@ -398,7 +629,8 @@ def callback_handler(call):
             "📊 *GIVEAWAY STATISTICS*\n\n"
             f"📦 Total Codes: `{total}`\n"
             f"🟢 Unused: `{unused}`\n"
-            f"🔴 Used: `{used}`"
+            f"🔴 Used: `{used}`\n\n"
+            f"👥 Registered Users: `{users}`"
         )
 
         bot.send_message(
@@ -408,12 +640,69 @@ def callback_handler(call):
 
         bot.answer_callback_query(call.id)
 
+    # =========================
+    # ADMIN BROADCAST
+    # =========================
 
-# =========================
-# ADMIN STATES
-# =========================
+    elif call.data == "admin_broadcast":
 
-admin_states = {}
+        admin_states[user_id] = {
+            "step": "waiting_broadcast"
+        }
+
+        bot.send_message(
+            call.message.chat.id,
+            "📢 *BROADCAST SYSTEM*\n\n"
+            "যে মেসেজটি সকল registered user-কে পাঠাতে চান সেটি এখন পাঠান।\n\n"
+            "⚠️ Broadcast শুরু হওয়ার পর Cancel করা যাবে।"
+        )
+
+        bot.answer_callback_query(call.id)
+
+    # =========================
+    # ADMIN DIRECT CHAT
+    # =========================
+
+    elif call.data == "admin_direct_chat":
+
+        admin_states[user_id] = {
+            "step": "waiting_user_id"
+        }
+
+        bot.send_message(
+            call.message.chat.id,
+            "💬 *DIRECT USER CHAT*\n\n"
+            "যে User-এর সাথে কথা বলতে চান তার Telegram User ID পাঠান।\n\n"
+            "Example:\n"
+            "`123456789`"
+        )
+
+        bot.answer_callback_query(call.id)
+
+    # =========================
+    # BROADCAST CANCEL
+    # =========================
+
+    elif call.data == "broadcast_cancel":
+
+        global broadcast_running
+
+        broadcast_running = False
+
+        if ADMIN_ID in admin_states:
+            del admin_states[ADMIN_ID]
+
+        bot.answer_callback_query(
+            call.id,
+            "🛑 Broadcast cancelled!"
+        )
+
+        bot.send_message(
+            call.message.chat.id,
+            "🛑 *BROADCAST CANCELLED*\n\n"
+            "Broadcast বন্ধ করা হয়েছে।",
+            reply_markup=admin_keyboard()
+        )
 
 
 # =========================
@@ -427,13 +716,18 @@ admin_states = {}
 )
 def admin_input(message):
 
+    global broadcast_running
+
     user_id = message.from_user.id
     state = admin_states.get(user_id)
 
     if not state:
         return
 
-    # STEP 1: CODE
+    # =========================
+    # ADD GIVEAWAY - CODE
+    # =========================
+
     if state["step"] == "waiting_code":
 
         code = message.text.strip().upper()
@@ -474,7 +768,10 @@ def admin_input(message):
 
         return
 
-    # STEP 2: REWARD
+    # =========================
+    # ADD GIVEAWAY - REWARD
+    # =========================
+
     if state["step"] == "waiting_reward":
 
         reward = message.text.strip()
@@ -506,6 +803,241 @@ def admin_input(message):
             "🟢 Status: Unused"
         )
 
+        return
+
+    # =========================
+    # WAITING USER ID
+    # =========================
+
+    if state["step"] == "waiting_user_id":
+
+        try:
+            target_user_id = int(message.text.strip())
+        except Exception:
+
+            bot.reply_to(
+                message,
+                "❌ সঠিক User ID দিন।\n\n"
+                "Example:\n"
+                "`123456789`"
+            )
+
+            return
+
+        conn = db()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            "SELECT user_id, username, first_name FROM users WHERE user_id=?",
+            (target_user_id,)
+        )
+
+        target = cursor.fetchone()
+
+        conn.close()
+
+        if not target:
+
+            bot.reply_to(
+                message,
+                "❌ এই User ID আমাদের registered user list-এ পাওয়া যায়নি।"
+            )
+
+            return
+
+        active_direct_chat[ADMIN_ID] = target_user_id
+
+        admin_states[user_id] = {
+            "step": "direct_chat",
+            "target_user_id": target_user_id
+        }
+
+        username = (
+            f"@{target[1]}"
+            if target[1]
+            else "No Username"
+        )
+
+        bot.send_message(
+            message.chat.id,
+            "💬 *DIRECT CHAT ACTIVATED*\n\n"
+            f"👤 Name: `{target[2] or 'Unknown'}`\n"
+            f"🔗 Username: `{username}`\n"
+            f"🆔 User ID: `{target_user_id}`\n\n"
+            "✉️ এখন আপনার মেসেজ লিখুন।\n\n"
+            "🛑 Chat বন্ধ করতে `/endchat` লিখুন।"
+        )
+
+        return
+
+    # =========================
+    # DIRECT CHAT ADMIN MESSAGE
+    # =========================
+
+    if state["step"] == "direct_chat":
+
+        target_user_id = state["target_user_id"]
+
+        if message.text.strip() == "/endchat":
+
+            active_direct_chat.pop(ADMIN_ID, None)
+            admin_states.pop(ADMIN_ID, None)
+
+            bot.send_message(
+                message.chat.id,
+                "🛑 *DIRECT CHAT ENDED*",
+                reply_markup=admin_keyboard()
+            )
+
+            return
+
+        try:
+
+            bot.send_message(
+                target_user_id,
+                "💬 *ADMIN MESSAGE*\n\n"
+                f"{message.text}"
+            )
+
+            bot.reply_to(
+                message,
+                "✅ Message sent to user."
+            )
+
+        except Exception:
+
+            bot.reply_to(
+                message,
+                "❌ User-এর কাছে message পাঠানো যায়নি।"
+            )
+
+        return
+
+    # =========================
+    # BROADCAST
+    # =========================
+
+    if state["step"] == "waiting_broadcast":
+
+        broadcast_text = message.text.strip()
+
+        if not broadcast_text:
+
+            bot.reply_to(
+                message,
+                "❌ Empty message পাঠানো যাবে না।"
+            )
+
+            return
+
+        admin_states[user_id] = {
+            "step": "broadcasting"
+        }
+
+        broadcast_running = True
+
+        conn = db()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            "SELECT user_id FROM users"
+        )
+
+        users = cursor.fetchall()
+
+        conn.close()
+
+        total = len(users)
+        success = 0
+        failed = 0
+
+        bot.send_message(
+            message.chat.id,
+            "📢 *BROADCAST STARTED*\n\n"
+            f"👥 Total Users: `{total}`\n\n"
+            "⏳ Sending..."
+            ,
+            reply_markup=broadcast_markup()
+        )
+
+        for row in users:
+
+            if not broadcast_running:
+                break
+
+            target_id = row[0]
+
+            try:
+
+                bot.send_message(
+                    target_id,
+                    "📢 *ANNOUNCEMENT*\n\n"
+                    f"{broadcast_text}"
+                )
+
+                success += 1
+
+            except Exception:
+
+                failed += 1
+
+        broadcast_running = False
+
+        if ADMIN_ID in admin_states:
+            del admin_states[ADMIN_ID]
+
+        bot.send_message(
+            message.chat.id,
+            "🎉 *BROADCAST FINISHED*\n\n"
+            f"👥 Total: `{total}`\n"
+            f"✅ Sent: `{success}`\n"
+            f"❌ Failed: `{failed}`",
+            reply_markup=admin_keyboard()
+        )
+
+        return
+
+
+# =========================
+# USER DIRECT CHAT REPLY
+# =========================
+
+@bot.message_handler(
+    func=lambda message:
+    message.from_user.id != ADMIN_ID and
+    message.from_user.id in active_direct_chat.values()
+)
+def user_direct_chat(message):
+
+    user_id = message.from_user.id
+
+    if message.text and message.text.startswith("/start"):
+        return
+
+    try:
+
+        username = (
+            f"@{message.from_user.username}"
+            if message.from_user.username
+            else "No Username"
+        )
+
+        text = (
+            "💬 *USER MESSAGE*\n\n"
+            f"👤 Name: `{message.from_user.first_name or 'Unknown'}`\n"
+            f"🔗 Username: `{username}`\n"
+            f"🆔 User ID: `{user_id}`\n\n"
+            f"📩 Message:\n{message.text or '📎 Non-text message'}"
+        )
+
+        bot.send_message(
+            ADMIN_ID,
+            text
+        )
+
+    except Exception:
+        pass
+
 
 # =========================
 # REDEEM CODE
@@ -525,6 +1057,8 @@ def redeem_code(message):
 
         send_force_join(message.chat.id)
         return
+
+    save_user(message.from_user)
 
     conn = db()
     cursor = conn.cursor()
@@ -683,6 +1217,49 @@ def settings(message):
 
 
 # =========================
+# END DIRECT CHAT COMMAND
+# =========================
+
+@bot.message_handler(commands=["endchat"])
+def end_chat(message):
+
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    active_direct_chat.pop(ADMIN_ID, None)
+
+    if ADMIN_ID in admin_states:
+        del admin_states[ADMIN_ID]
+
+    bot.send_message(
+        message.chat.id,
+        "🛑 *DIRECT CHAT ENDED*",
+        reply_markup=admin_keyboard()
+    )
+
+
+# =========================
+# ADMIN COMMAND: BROADCAST
+# =========================
+
+@bot.message_handler(commands=["broadcast"])
+def broadcast_command(message):
+
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    admin_states[ADMIN_ID] = {
+        "step": "waiting_broadcast"
+    }
+
+    bot.send_message(
+        message.chat.id,
+        "📢 *BROADCAST SYSTEM*\n\n"
+        "এখন যে মেসেজটি সকল registered user-কে পাঠাতে চান সেটি পাঠান।"
+    )
+
+
+# =========================
 # LANGUAGE CALLBACK
 # =========================
 
@@ -740,4 +1317,4 @@ bot.infinity_polling(
     skip_pending=True,
     timeout=30,
     long_polling_timeout=30
-    )
+)
