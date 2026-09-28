@@ -17,8 +17,11 @@ from telebot.types import (
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
+# PUBLIC CHANNEL
 CHANNEL_1 = os.getenv("CHANNEL_1", "@hacksmethod6")
-CHANNEL_2 = os.getenv("CHANNEL_2", "@rafimhossen3")
+
+# PUBLIC GROUP
+GROUP_1 = os.getenv("GROUP_1", "@rafimhossen3")
 
 DB_FILE = "premium_giveaway.db"
 
@@ -31,7 +34,7 @@ if not ADMIN_ID:
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="Markdown")
 
 # =========================
-# FLASK SERVER FOR RENDER
+# FLASK
 # =========================
 
 app = Flask(__name__)
@@ -61,6 +64,7 @@ def db():
 
 
 def init_db():
+
     conn = db()
     cursor = conn.cursor()
 
@@ -83,10 +87,6 @@ def init_db():
         )
     """)
 
-    # =========================
-    # USERS TABLE
-    # =========================
-
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -107,6 +107,7 @@ def init_db():
 # =========================
 
 def save_user(user):
+
     conn = db()
     cursor = conn.cursor()
 
@@ -138,23 +139,8 @@ def save_user(user):
     conn.close()
 
 
-def is_new_user(user_id):
-    conn = db()
-    cursor = conn.cursor()
-
-    cursor.execute(
-        "SELECT user_id FROM users WHERE user_id=?",
-        (user_id,)
-    )
-
-    result = cursor.fetchone()
-
-    conn.close()
-
-    return result is None
-
-
 def alert_already_sent(user_id):
+
     conn = db()
     cursor = conn.cursor()
 
@@ -171,6 +157,7 @@ def alert_already_sent(user_id):
 
 
 def mark_alert_sent(user_id):
+
     conn = db()
     cursor = conn.cursor()
 
@@ -196,7 +183,11 @@ def send_new_user_alert(user):
     if alert_already_sent(user.id):
         return
 
-    username = f"@{user.username}" if user.username else "❌ No Username"
+    username = (
+        f"@{user.username}"
+        if user.username
+        else "❌ No Username"
+    )
 
     full_name = user.first_name or ""
 
@@ -208,11 +199,13 @@ def send_new_user_alert(user):
         f"👤 Name: `{full_name}`\n"
         f"🔗 Username: `{username}`\n"
         f"🆔 User ID: `{user.id}`\n\n"
-        "✅ দুইটি Channel Join করা হয়েছে।\n"
+        "📢 Channel: ✅ Joined\n"
+        "👥 Group: ✅ Joined\n\n"
         "🎉 New user successfully registered!"
     )
 
     try:
+
         bot.send_message(
             ADMIN_ID,
             text
@@ -225,10 +218,11 @@ def send_new_user_alert(user):
 
 
 # =========================
-# LANGUAGE
+# LANGUAGE SYSTEM
 # =========================
 
 def get_user_lang(user_id):
+
     conn = db()
     cursor = conn.cursor()
 
@@ -238,64 +232,201 @@ def get_user_lang(user_id):
     )
 
     result = cursor.fetchone()
+
     conn.close()
 
-    return result[0] if result else "bn"
+    if result:
+        return result[0]
+
+    return "bn"
 
 
 def set_user_lang(user_id, lang):
+
+    if lang not in ["bn", "en"]:
+        lang = "bn"
+
     conn = db()
     cursor = conn.cursor()
 
     cursor.execute("""
-        INSERT OR REPLACE INTO user_lang(user_id, lang)
+        INSERT INTO user_lang(user_id, lang)
         VALUES (?, ?)
-    """, (user_id, lang))
+        ON CONFLICT(user_id)
+        DO UPDATE SET lang=excluded.lang
+    """, (
+        user_id,
+        lang
+    ))
 
     conn.commit()
     conn.close()
 
 
 # =========================
+# LANGUAGE TEXT
+# =========================
+
+TEXT = {
+
+    "bn": {
+
+        "settings": "⚙️ *SETTINGS*\n\n🌐 আপনার ভাষা নির্বাচন করুন:",
+
+        "lang_changed":
+        "✅ ভাষা সফলভাবে বাংলা করা হয়েছে।",
+
+        "welcome":
+        "🎁 *WELCOME TO GIVEAWAY BOT!*\n\n"
+        "🔑 আপনার Redeem Code এখানে ব্যবহার করুন।\n"
+        "🎁 Daily Giveaway দেখতে Daily Giveaway চাপুন।",
+
+        "redeem_button": "🔑 Redeem Code",
+        "settings_button": "⚙️ Settings",
+        "daily_button": "🎁 Daily Giveaway",
+        "status_button": "📊 My Status",
+
+        "access":
+        "🚨 *ACCESS REQUIRED*\n\n"
+        "এই বট ব্যবহার করতে আগে আমাদের Channel এবং Group-এ Join করুন।\n\n"
+        "📢 Channel-এ Join করুন\n"
+        "👥 Group-এ Join করুন\n\n"
+        "✅ দুই জায়গায় Join করার পর নিচের Verify বাটনে চাপুন।",
+
+        "verify_success":
+        "🎉 *Access Granted!*\n\n"
+        "এখন আপনি bot ব্যবহার করতে পারবেন।",
+
+        "verify_failed":
+        "❌ আগে Channel এবং Group-এ Join করুন।"
+    },
+
+    "en": {
+
+        "settings":
+        "⚙️ *SETTINGS*\n\n🌐 Select your language:",
+
+        "lang_changed":
+        "✅ Language successfully changed to English.",
+
+        "welcome":
+        "🎁 *WELCOME TO GIVEAWAY BOT!*\n\n"
+        "🔑 Send your Redeem Code here.\n"
+        "🎁 Press Daily Giveaway to view giveaway information.",
+
+        "redeem_button": "🔑 Redeem Code",
+        "settings_button": "⚙️ Settings",
+        "daily_button": "🎁 Daily Giveaway",
+        "status_button": "📊 My Status",
+
+        "access":
+        "🚨 *ACCESS REQUIRED*\n\n"
+        "Please join our Channel and Group before using the bot.\n\n"
+        "📢 Join the Channel\n"
+        "👥 Join the Group\n\n"
+        "✅ After joining both, press Verify.",
+
+        "verify_success":
+        "🎉 *Access Granted!*\n\n"
+        "You can now use the bot.",
+
+        "verify_failed":
+        "❌ Please join the Channel and Group first."
+    }
+}
+
+
+# =========================
+# MAIN KEYBOARD
+# =========================
+
+def main_keyboard(user_id=None):
+
+    lang = get_user_lang(user_id) if user_id else "bn"
+
+    keyboard = ReplyKeyboardMarkup(
+        resize_keyboard=True
+    )
+
+    keyboard.row(
+        KeyboardButton(TEXT[lang]["redeem_button"]),
+        KeyboardButton(TEXT[lang]["settings_button"])
+    )
+
+    keyboard.row(
+        KeyboardButton(TEXT[lang]["daily_button"]),
+        KeyboardButton(TEXT[lang]["status_button"])
+    )
+
+    return keyboard
+
+
+# =========================
 # FORCE JOIN
 # =========================
 
-def is_user_subscribed(user_id):
+def get_member_status(chat_id, user_id):
 
     try:
-        member1 = bot.get_chat_member(CHANNEL_1, user_id)
-        member2 = bot.get_chat_member(CHANNEL_2, user_id)
 
-        valid_status = [
-            "creator",
-            "administrator",
-            "member"
-        ]
-
-        return (
-            member1.status in valid_status and
-            member2.status in valid_status
+        member = bot.get_chat_member(
+            chat_id,
+            user_id
         )
 
+        return member.status
+
     except Exception:
-        return False
+
+        return None
+
+
+def is_valid_member(status):
+
+    return status in [
+        "creator",
+        "administrator",
+        "member"
+    ]
+
+
+def is_user_subscribed(user_id):
+
+    channel_status = get_member_status(
+        CHANNEL_1,
+        user_id
+    )
+
+    group_status = get_member_status(
+        GROUP_1,
+        user_id
+    )
+
+    return (
+        is_valid_member(channel_status)
+        and
+        is_valid_member(group_status)
+    )
 
 
 def force_join_markup():
 
     markup = InlineKeyboardMarkup()
 
+    channel_username = CHANNEL_1.replace("@", "").strip()
+    group_username = GROUP_1.replace("@", "").strip()
+
     markup.row(
         InlineKeyboardButton(
-            "💬 Join Chat Channel",
-            url=f"https://t.me/{CHANNEL_1.replace('@', '')}"
+            "📢 Join Channel",
+            url=f"https://t.me/{channel_username}"
         )
     )
 
     markup.row(
         InlineKeyboardButton(
-            "📢 Join Main Channel",
-            url=f"https://t.me/{CHANNEL_2.replace('@', '')}"
+            "👥 Join Group",
+            url=f"https://t.me/{group_username}"
         )
     )
 
@@ -311,40 +442,17 @@ def force_join_markup():
 
 def send_force_join(chat_id):
 
-    text = (
-        "🚨 *ACCESS REQUIRED*\n\n"
-        "এই বট ব্যবহার করতে আগে আমাদের দুইটি চ্যানেলে Join করুন।\n\n"
-        "✅ দুইটি চ্যানেলে Join করার পর নিচের Verify বাটনে চাপুন।"
-    )
+    user_id = chat_id
+
+    lang = get_user_lang(user_id)
+
+    text = TEXT[lang]["access"]
 
     bot.send_message(
         chat_id,
         text,
         reply_markup=force_join_markup()
     )
-
-
-# =========================
-# REPLY KEYBOARD
-# =========================
-
-def main_keyboard():
-
-    keyboard = ReplyKeyboardMarkup(
-        resize_keyboard=True
-    )
-
-    keyboard.row(
-        KeyboardButton("🔑 Redeem Code"),
-        KeyboardButton("⚙️ Settings")
-    )
-
-    keyboard.row(
-        KeyboardButton("🎁 Daily Giveaway"),
-        KeyboardButton("📊 My Status")
-    )
-
-    return keyboard
 
 
 # =========================
@@ -399,13 +507,7 @@ def admin_keyboard():
 
 admin_states = {}
 
-# Active direct chats:
-# ADMIN_ID -> USER_ID
 active_direct_chat = {}
-
-# =========================
-# BROADCAST CONTROL
-# =========================
 
 broadcast_running = False
 
@@ -433,7 +535,6 @@ def start_command(message):
 
     user_id = message.from_user.id
 
-    # ADMIN
     if user_id == ADMIN_ID:
 
         bot.send_message(
@@ -446,24 +547,22 @@ def start_command(message):
 
         return
 
-    # CHECK FORCE JOIN
     if not is_user_subscribed(user_id):
 
         send_force_join(message.chat.id)
+
         return
 
-    # SAVE USER
     save_user(message.from_user)
 
-    # ADMIN ONLY NEW USER ALERT
     send_new_user_alert(message.from_user)
+
+    lang = get_user_lang(user_id)
 
     bot.send_message(
         message.chat.id,
-        "🎁 *WELCOME TO GIVEAWAY BOT!*\n\n"
-        "🔑 আপনার Redeem Code এখানে ব্যবহার করুন।\n"
-        "🎁 Daily Giveaway দেখতে Daily Giveaway চাপুন।",
-        reply_markup=main_keyboard()
+        TEXT[lang]["welcome"],
+        reply_markup=main_keyboard(user_id)
     )
 
 
@@ -474,10 +573,12 @@ def start_command(message):
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
 
+    global broadcast_running
+
     user_id = call.from_user.id
 
     # =========================
-    # VERIFY JOIN
+    # VERIFY
     # =========================
 
     if call.data == "verify_join":
@@ -485,8 +586,14 @@ def callback_handler(call):
         if is_user_subscribed(user_id):
 
             if user_id != ADMIN_ID:
+
                 save_user(call.from_user)
-                send_new_user_alert(call.from_user)
+
+                send_new_user_alert(
+                    call.from_user
+                )
+
+            lang = get_user_lang(user_id)
 
             bot.answer_callback_query(
                 call.id,
@@ -495,18 +602,60 @@ def callback_handler(call):
 
             bot.send_message(
                 call.message.chat.id,
-                "🎉 *Access Granted!*\n\n"
-                "এখন আপনি bot ব্যবহার করতে পারবেন।",
-                reply_markup=main_keyboard()
+                TEXT[lang]["verify_success"],
+                reply_markup=main_keyboard(user_id)
+            )
+
+        else:
+
+            lang = get_user_lang(user_id)
+
+            bot.answer_callback_query(
+                call.id,
+                TEXT[lang]["verify_failed"],
+                show_alert=True
+            )
+
+        return
+
+    # =========================
+    # LANGUAGE
+    # =========================
+
+    if call.data.startswith("lang_"):
+
+        lang = call.data.replace(
+            "lang_",
+            ""
+        )
+
+        if lang not in ["bn", "en"]:
+            lang = "bn"
+
+        set_user_lang(
+            user_id,
+            lang
+        )
+
+        if lang == "bn":
+
+            bot.answer_callback_query(
+                call.id,
+                "🇧🇩 বাংলা সেট করা হয়েছে!"
             )
 
         else:
 
             bot.answer_callback_query(
                 call.id,
-                "❌ আগে দুইটি channel join করুন।",
-                show_alert=True
+                "🇺🇸 English selected!"
             )
+
+        bot.send_message(
+            call.message.chat.id,
+            TEXT[lang]["lang_changed"],
+            reply_markup=main_keyboard(user_id)
+        )
 
         return
 
@@ -562,6 +711,7 @@ def callback_handler(call):
         """)
 
         rows = cursor.fetchall()
+
         conn.close()
 
         if not rows:
@@ -641,7 +791,7 @@ def callback_handler(call):
         bot.answer_callback_query(call.id)
 
     # =========================
-    # ADMIN BROADCAST
+    # BROADCAST
     # =========================
 
     elif call.data == "admin_broadcast":
@@ -660,7 +810,7 @@ def callback_handler(call):
         bot.answer_callback_query(call.id)
 
     # =========================
-    # ADMIN DIRECT CHAT
+    # DIRECT CHAT
     # =========================
 
     elif call.data == "admin_direct_chat":
@@ -685,12 +835,12 @@ def callback_handler(call):
 
     elif call.data == "broadcast_cancel":
 
-        global broadcast_running
-
         broadcast_running = False
 
-        if ADMIN_ID in admin_states:
-            del admin_states[ADMIN_ID]
+        admin_states.pop(
+            ADMIN_ID,
+            None
+        )
 
         bot.answer_callback_query(
             call.id,
@@ -711,8 +861,8 @@ def callback_handler(call):
 
 @bot.message_handler(
     func=lambda message:
-    message.from_user.id == ADMIN_ID and
-    message.from_user.id in admin_states
+    message.from_user.id == ADMIN_ID
+    and message.from_user.id in admin_states
 )
 def admin_input(message):
 
@@ -725,10 +875,13 @@ def admin_input(message):
         return
 
     # =========================
-    # ADD GIVEAWAY - CODE
+    # ADD CODE
     # =========================
 
     if state["step"] == "waiting_code":
+
+        if not message.text:
+            return
 
         code = message.text.strip().upper()
 
@@ -769,10 +922,13 @@ def admin_input(message):
         return
 
     # =========================
-    # ADD GIVEAWAY - REWARD
+    # REWARD
     # =========================
 
     if state["step"] == "waiting_reward":
+
+        if not message.text:
+            return
 
         reward = message.text.strip()
         code = state["code"]
@@ -793,7 +949,10 @@ def admin_input(message):
         conn.commit()
         conn.close()
 
-        del admin_states[user_id]
+        admin_states.pop(
+            user_id,
+            None
+        )
 
         bot.reply_to(
             message,
@@ -806,13 +965,20 @@ def admin_input(message):
         return
 
     # =========================
-    # WAITING USER ID
+    # USER ID
     # =========================
 
     if state["step"] == "waiting_user_id":
 
+        if not message.text:
+            return
+
         try:
-            target_user_id = int(message.text.strip())
+
+            target_user_id = int(
+                message.text.strip()
+            )
+
         except Exception:
 
             bot.reply_to(
@@ -828,7 +994,11 @@ def admin_input(message):
         cursor = conn.cursor()
 
         cursor.execute(
-            "SELECT user_id, username, first_name FROM users WHERE user_id=?",
+            """
+            SELECT user_id, username, first_name
+            FROM users
+            WHERE user_id=?
+            """,
             (target_user_id,)
         )
 
@@ -871,22 +1041,41 @@ def admin_input(message):
         return
 
     # =========================
-    # DIRECT CHAT ADMIN MESSAGE
+    # DIRECT CHAT
     # =========================
 
     if state["step"] == "direct_chat":
 
         target_user_id = state["target_user_id"]
 
-        if message.text.strip() == "/endchat":
+        if (
+            message.text
+            and
+            message.text.strip() == "/endchat"
+        ):
 
-            active_direct_chat.pop(ADMIN_ID, None)
-            admin_states.pop(ADMIN_ID, None)
+            active_direct_chat.pop(
+                ADMIN_ID,
+                None
+            )
+
+            admin_states.pop(
+                ADMIN_ID,
+                None
+            )
 
             bot.send_message(
                 message.chat.id,
                 "🛑 *DIRECT CHAT ENDED*",
                 reply_markup=admin_keyboard()
+            )
+
+            return
+
+        if not message.text:
+            bot.reply_to(
+                message,
+                "❌ আপাতত শুধু text message পাঠানো যাবে।"
             )
 
             return
@@ -919,15 +1108,20 @@ def admin_input(message):
 
     if state["step"] == "waiting_broadcast":
 
+        if not message.text:
+            bot.reply_to(
+                message,
+                "❌ আপাতত শুধু text broadcast করা যাবে।"
+            )
+            return
+
         broadcast_text = message.text.strip()
 
         if not broadcast_text:
-
             bot.reply_to(
                 message,
                 "❌ Empty message পাঠানো যাবে না।"
             )
-
             return
 
         admin_states[user_id] = {
@@ -955,8 +1149,7 @@ def admin_input(message):
             message.chat.id,
             "📢 *BROADCAST STARTED*\n\n"
             f"👥 Total Users: `{total}`\n\n"
-            "⏳ Sending..."
-            ,
+            "⏳ Sending...",
             reply_markup=broadcast_markup()
         )
 
@@ -983,8 +1176,10 @@ def admin_input(message):
 
         broadcast_running = False
 
-        if ADMIN_ID in admin_states:
-            del admin_states[ADMIN_ID]
+        admin_states.pop(
+            ADMIN_ID,
+            None
+        )
 
         bot.send_message(
             message.chat.id,
@@ -999,19 +1194,24 @@ def admin_input(message):
 
 
 # =========================
-# USER DIRECT CHAT REPLY
+# USER DIRECT CHAT
 # =========================
 
 @bot.message_handler(
     func=lambda message:
-    message.from_user.id != ADMIN_ID and
+    message.from_user.id != ADMIN_ID
+    and
     message.from_user.id in active_direct_chat.values()
 )
 def user_direct_chat(message):
 
     user_id = message.from_user.id
 
-    if message.text and message.text.startswith("/start"):
+    if (
+        message.text
+        and
+        message.text.startswith("/start")
+    ):
         return
 
     try:
@@ -1027,7 +1227,8 @@ def user_direct_chat(message):
             f"👤 Name: `{message.from_user.first_name or 'Unknown'}`\n"
             f"🔗 Username: `{username}`\n"
             f"🆔 User ID: `{user_id}`\n\n"
-            f"📩 Message:\n{message.text or '📎 Non-text message'}"
+            f"📩 Message:\n"
+            f"{message.text or '📎 Non-text message'}"
         )
 
         bot.send_message(
@@ -1045,7 +1246,8 @@ def user_direct_chat(message):
 
 @bot.message_handler(
     func=lambda message:
-    message.text and
+    message.text
+    and
     message.text.strip().upper().startswith("GIVE-")
 )
 def redeem_code(message):
@@ -1055,10 +1257,15 @@ def redeem_code(message):
 
     if not is_user_subscribed(user_id):
 
-        send_force_join(message.chat.id)
+        send_force_join(
+            message.chat.id
+        )
+
         return
 
-    save_user(message.from_user)
+    save_user(
+        message.from_user
+    )
 
     conn = db()
     cursor = conn.cursor()
@@ -1102,7 +1309,8 @@ def redeem_code(message):
         SET status='Used',
             used_by=?,
             used_at=CURRENT_TIMESTAMP
-        WHERE id=? AND status='Unused'
+        WHERE id=?
+        AND status='Unused'
     """, (
         user_id,
         db_id
@@ -1132,40 +1340,100 @@ def redeem_code(message):
 
 
 # =========================
-# REPLY BUTTONS
+# REDEEM BUTTON
+# =========================
+
+def is_redeem_button(text):
+
+    return text in [
+        "🔑 Redeem Code",
+        "🔑 Redeem Code"
+    ]
+
+
+@bot.message_handler(
+    func=lambda message:
+    message.text in [
+        "🔑 Redeem Code"
+    ]
+)
+def redeem_help(message):
+
+    lang = get_user_lang(
+        message.from_user.id
+    )
+
+    if lang == "en":
+
+        text = (
+            "🔑 *REDEEM CODE*\n\n"
+            "Send your Giveaway Code here.\n\n"
+            "Example:\n"
+            "`GIVE-2026-001`"
+        )
+
+    else:
+
+        text = (
+            "🔑 *REDEEM CODE*\n\n"
+            "আপনার পাওয়া Giveaway Code সরাসরি এখানে পাঠান।\n\n"
+            "Example:\n"
+            "`GIVE-2026-001`"
+        )
+
+    bot.send_message(
+        message.chat.id,
+        text
+    )
+
+
+# =========================
+# DAILY GIVEAWAY
 # =========================
 
 @bot.message_handler(
     func=lambda message:
-    message.text == "🔑 Redeem Code"
-)
-def redeem_help(message):
-
-    bot.send_message(
-        message.chat.id,
-        "🔑 *REDEEM CODE*\n\n"
-        "আপনার পাওয়া Giveaway Code সরাসরি এখানে পাঠান।\n\n"
-        "Example:\n"
-        "`GIVE-2026-001`"
-    )
-
-
-@bot.message_handler(
-    func=lambda message:
-    message.text == "🎁 Daily Giveaway"
+    message.text in [
+        "🎁 Daily Giveaway"
+    ]
 )
 def daily_giveaway(message):
 
+    lang = get_user_lang(
+        message.from_user.id
+    )
+
+    if lang == "en":
+
+        text = (
+            "🎁 *DAILY GIVEAWAY*\n\n"
+            "Check our channel announcements "
+            "for today's Giveaway Code."
+        )
+
+    else:
+
+        text = (
+            "🎁 *DAILY GIVEAWAY*\n\n"
+            "আজকের Giveaway Code পেতে "
+            "আমাদের channel-এর announcement দেখুন।"
+        )
+
     bot.send_message(
         message.chat.id,
-        "🎁 *DAILY GIVEAWAY*\n\n"
-        "আজকের Giveaway Code পেতে আমাদের channel-এর announcement দেখুন।"
+        text
     )
 
 
+# =========================
+# MY STATUS
+# =========================
+
 @bot.message_handler(
     func=lambda message:
-    message.text == "📊 My Status"
+    message.text in [
+        "📊 My Status"
+    ]
 )
 def my_status(message):
 
@@ -1183,18 +1451,42 @@ def my_status(message):
 
     conn.close()
 
+    lang = get_user_lang(user_id)
+
+    if lang == "en":
+
+        text = (
+            "📊 *YOUR STATUS*\n\n"
+            f"🎁 Redeemed: `{count}`"
+        )
+
+    else:
+
+        text = (
+            "📊 *YOUR STATUS*\n\n"
+            f"🎁 Redeemed: `{count}`"
+        )
+
     bot.send_message(
         message.chat.id,
-        f"📊 *YOUR STATUS*\n\n"
-        f"🎁 Redeemed: `{count}`"
+        text
     )
 
 
+# =========================
+# SETTINGS
+# =========================
+
 @bot.message_handler(
     func=lambda message:
-    message.text == "⚙️ Settings"
+    message.text in [
+        "⚙️ Settings"
+    ]
 )
 def settings(message):
+
+    user_id = message.from_user.id
+    lang = get_user_lang(user_id)
 
     markup = InlineKeyboardMarkup()
 
@@ -1211,25 +1503,32 @@ def settings(message):
 
     bot.send_message(
         message.chat.id,
-        "⚙️ *SETTINGS*\n\nভাষা নির্বাচন করুন:",
+        TEXT[lang]["settings"],
         reply_markup=markup
     )
 
 
 # =========================
-# END DIRECT CHAT COMMAND
+# END DIRECT CHAT
 # =========================
 
-@bot.message_handler(commands=["endchat"])
+@bot.message_handler(
+    commands=["endchat"]
+)
 def end_chat(message):
 
     if message.from_user.id != ADMIN_ID:
         return
 
-    active_direct_chat.pop(ADMIN_ID, None)
+    active_direct_chat.pop(
+        ADMIN_ID,
+        None
+    )
 
-    if ADMIN_ID in admin_states:
-        del admin_states[ADMIN_ID]
+    admin_states.pop(
+        ADMIN_ID,
+        None
+    )
 
     bot.send_message(
         message.chat.id,
@@ -1239,10 +1538,12 @@ def end_chat(message):
 
 
 # =========================
-# ADMIN COMMAND: BROADCAST
+# BROADCAST COMMAND
 # =========================
 
-@bot.message_handler(commands=["broadcast"])
+@bot.message_handler(
+    commands=["broadcast"]
+)
 def broadcast_command(message):
 
     if message.from_user.id != ADMIN_ID:
@@ -1260,48 +1561,7 @@ def broadcast_command(message):
 
 
 # =========================
-# LANGUAGE CALLBACK
-# =========================
-
-@bot.callback_query_handler(
-    func=lambda call: call.data.startswith("lang_")
-)
-def language_callback(call):
-
-    user_id = call.from_user.id
-    lang = call.data.replace("lang_", "")
-
-    set_user_lang(user_id, lang)
-
-    if lang == "bn":
-
-        bot.answer_callback_query(
-            call.id,
-            "🇧🇩 বাংলা সেট করা হয়েছে!"
-        )
-
-        bot.send_message(
-            call.message.chat.id,
-            "✅ ভাষা বাংলা করা হয়েছে।",
-            reply_markup=main_keyboard()
-        )
-
-    else:
-
-        bot.answer_callback_query(
-            call.id,
-            "🇺🇸 English selected!"
-        )
-
-        bot.send_message(
-            call.message.chat.id,
-            "✅ Language changed to English.",
-            reply_markup=main_keyboard()
-        )
-
-
-# =========================
-# START BOT
+# START
 # =========================
 
 init_db()
