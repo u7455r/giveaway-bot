@@ -18,8 +18,8 @@ from flask import Flask
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-CHANNEL_1 = os.getenv("CHANNEL_1", "@bdgivewaychat").strip()
-GROUP_1 = os.getenv("GROUP_1", "@bdgiveaways24").strip()
+CHANNEL_1 = os.getenv("CHANNEL_1", "https://t.me/bdgivewaychat").strip()
+GROUP_1 = os.getenv("GROUP_1", "https://t.me/bdgiveaways24").strip()
 
 DB_FILE = os.getenv("DB_FILE", "giveaway_bot.db")
 SUPPORT_USERNAME = os.getenv(
