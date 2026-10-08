@@ -1,119 +1,164 @@
+# ============================================================
+# RAFIM GIVEAWAY BOT
+# Render Ready | Flask + Telegram Polling | SQLite
+# Bengali / English | Force Join | Redeem | Giveaway
+# Daily Giveaway | Status | Settings | Help
+# Admin Panel | Broadcast | Direct User Chat
+# ============================================================
+
 import os
+import sys
+import time
 import sqlite3
+import threading
 import secrets
 import string
-import threading
-import time
+import traceback
 from datetime import datetime, timezone
-from functools import wraps
 
 import telebot
 from telebot import types
 from flask import Flask
 
 
-# =========================================================
-# RAFIM GIVEAWAY BOT — FINAL
-# =========================================================
+# ============================================================
+# ENVIRONMENT
+# ============================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0") or 0)
+
+ADMIN_ID_RAW = os.getenv("ADMIN_ID", "0").strip()
+
+try:
+    ADMIN_ID = int(ADMIN_ID_RAW)
+except Exception:
+    ADMIN_ID = 0
 
 CHANNEL_1 = os.getenv("CHANNEL_1", "@bdgiveaways24").strip()
 GROUP_1 = os.getenv("GROUP_1", "@bdgivewaychat").strip()
 
-SUPPORT_USERNAME = os.getenv(
-    "SUPPORT_USERNAME",
-    "rafimhossen"
-).strip().lstrip("@")
+SUPPORT_USERNAME = (
+    os.getenv("SUPPORT_USERNAME", "rafimhossen")
+    .strip()
+    .lstrip("@")
+)
 
-DB_FILE = os.getenv("DB_FILE", "giveaway_bot.db")
+DB_FILE = os.getenv("DB_FILE", "giveaway_bot.db").strip()
+
+PORT_RAW = os.getenv("PORT", "10000").strip()
+
+try:
+    PORT = int(PORT_RAW)
+except Exception:
+    PORT = 10000
+
+
+# ============================================================
+# BASIC VALIDATION
+# ============================================================
+
+print("=" * 60)
+print("RAFIM GIVEAWAY BOT")
+print("=" * 60)
+
+print("Channel:", CHANNEL_1)
+print("Group:", GROUP_1)
+print("Admin:", ADMIN_ID)
+print("Port:", PORT)
 
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is missing.")
+    print()
+    print("FATAL ERROR: BOT_TOKEN is missing.")
+    print("Render Environment-এ BOT_TOKEN সেট করুন।")
+    print("=" * 60)
+    sys.exit(1)
 
-bot = telebot.TeleBot(
-    BOT_TOKEN,
-    parse_mode="HTML"
-)
+if ADMIN_ID == 0:
+    print()
+    print("WARNING: ADMIN_ID is 0.")
+    print("Admin panel কাজ করবে না যতক্ষণ সঠিক ADMIN_ID না দেওয়া হয়.")
+
+
+# ============================================================
+# BOT
+# ============================================================
+
+try:
+    bot = telebot.TeleBot(
+        BOT_TOKEN,
+        parse_mode="HTML",
+        threaded=True,
+        num_threads=8
+    )
+except Exception as e:
+    print("FATAL: Bot initialization failed:")
+    print(repr(e))
+    sys.exit(1)
+
+
+# ============================================================
+# FLASK
+# ============================================================
 
 app = Flask(__name__)
 
-db_lock = threading.Lock()
-
-redeem_waiting = set()
-admin_state = {}
-broadcast_state = {}
-
-
-# =========================================================
-# TIME
-# =========================================================
-
-def utc_now():
-    return datetime.now(timezone.utc).isoformat()
-
-
-# =========================================================
-# FLASK / RENDER
-# =========================================================
 
 @app.route("/")
 def home():
-    return "Giveaway Bot is running! ✅"
+    return "Rafim Giveaway Bot is Running ✅", 200
 
 
 @app.route("/health")
 def health():
-    return "OK"
+    return "OK", 200
 
 
-def run_flask():
-    port = int(os.getenv("PORT", "10000"))
-    app.run(
-        host="0.0.0.0",
-        port=port
-    )
-
-
-# =========================================================
+# ============================================================
 # DATABASE
-# =========================================================
+# ============================================================
 
-def db():
+db_lock = threading.RLock()
+
+
+def db_connect():
     conn = sqlite3.connect(
         DB_FILE,
+        timeout=30,
         check_same_thread=False
     )
     conn.row_factory = sqlite3.Row
+
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+    except Exception:
+        pass
+
     return conn
 
 
 def init_db():
     with db_lock:
-        conn = db()
+        conn = db_connect()
+        cur = conn.cursor()
 
-        conn.execute("""
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 username TEXT,
                 first_name TEXT,
                 last_name TEXT,
                 language TEXT DEFAULT 'bn',
-                joined_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                last_seen TEXT DEFAULT CURRENT_TIMESTAMP,
-                alert_sent INTEGER DEFAULT 0
+                banned INTEGER DEFAULT 0,
+                joined_verified INTEGER DEFAULT 0,
+                alert_sent INTEGER DEFAULT 0,
+                created_at TEXT,
+                updated_at TEXT
             )
         """)
 
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS user_lang (
-                user_id INTEGER PRIMARY KEY,
-                language TEXT DEFAULT 'bn'
-            )
-        """)
-
-        conn.execute("""
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS giveaways (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 redeem_code TEXT UNIQUE NOT NULL,
@@ -122,36 +167,49 @@ def init_db():
                 status TEXT DEFAULT 'active',
                 used_by INTEGER,
                 used_at TEXT,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT
             )
         """)
 
-        conn.execute("""
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS redemptions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 redeem_code TEXT NOT NULL,
                 reward_text TEXT NOT NULL,
-                redeemed_at TEXT DEFAULT CURRENT_TIMESTAMP
+                redeemed_at TEXT
             )
         """)
 
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS broadcast_history (
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS user_settings (
+                user_id INTEGER PRIMARY KEY,
+                language TEXT DEFAULT 'bn',
+                updated_at TEXT
+            )
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS broadcast_jobs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 admin_id INTEGER,
                 message_text TEXT,
+                status TEXT DEFAULT 'running',
                 total INTEGER DEFAULT 0,
                 sent INTEGER DEFAULT 0,
                 failed INTEGER DEFAULT 0,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT,
+                finished_at TEXT
             )
         """)
 
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS banned_users (
-                user_id INTEGER PRIMARY KEY,
-                banned_at TEXT DEFAULT CURRENT_TIMESTAMP
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS broadcast_failures (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER,
+                user_id INTEGER,
+                error TEXT,
+                created_at TEXT
             )
         """)
 
@@ -159,223 +217,311 @@ def init_db():
         conn.close()
 
 
-init_db()
+# ============================================================
+# TIME
+# ============================================================
+
+def utc_now():
+    return datetime.now(timezone.utc).isoformat()
 
 
-# =========================================================
-# TRANSLATIONS
-# =========================================================
-
-TEXTS = {
-    "welcome": {
-        "bn": "👋 <b>স্বাগতম!</b>\n\n🎁 Giveaway Bot-এ তোমাকে স্বাগতম।",
-        "en": "👋 <b>Welcome!</b>\n\n🎁 Welcome to the Giveaway Bot."
-    },
-
-    "join_required": {
-        "bn": "🔒 <b>আগে Channel এবং Group-এ Join করুন।</b>\n\nতারপর নিচের <b>Verify</b> বাটনে চাপুন।",
-        "en": "🔒 <b>Please join the Channel and Group first.</b>\n\nThen press <b>Verify</b>."
-    },
-
-    "join_success": {
-        "bn": "✅ <b>Verification সফল!</b>\n\nএখন আপনি Bot ব্যবহার করতে পারবেন।",
-        "en": "✅ <b>Verification successful!</b>\n\nYou can now use the bot."
-    },
-
-    "not_joined": {
-        "bn": "❌ এখনো সব জায়গায় Join করা হয়নি।",
-        "en": "❌ You have not joined all required places yet."
-    },
-
-    "redeem_prompt": {
-        "bn": "🔑 আপনার Redeem Code পাঠান:",
-        "en": "🔑 Send your Redeem Code:"
-    },
-
-    "invalid_code": {
-        "bn": "❌ Code পাওয়া যায়নি অথবা এটি আর Active নেই।",
-        "en": "❌ Code was not found or is no longer active."
-    },
-
-    "redeem_success": {
-        "bn": "🎉 <b>Redeem Successful!</b>\n\n🎁 <b>Reward:</b>\n{reward}",
-        "en": "🎉 <b>Redeem Successful!</b>\n\n🎁 <b>Reward:</b>\n{reward}"
-    },
-
-    "status": {
-        "bn": "📊 <b>আমার স্ট্যাটাস</b>\n\n👤 ID: <code>{uid}</code>\n🎁 Redeemed: <b>{count}</b>",
-        "en": "📊 <b>My Status</b>\n\n👤 ID: <code>{uid}</code>\n🎁 Redeemed: <b>{count}</b>"
-    },
-
-    "help": {
-        "bn": "ℹ️ <b>Help</b>\n\n🔑 কোড রিডিম — Giveaway Code Redeem করুন\n🎁 ডেইলি গিভঅ্যাওয়ে — Active Giveaway দেখুন\n📊 আমার স্ট্যাটাস — আপনার তথ্য দেখুন\n⚙️ সেটিংস — Language পরিবর্তন করুন\n\n🆘 Support: @{support}",
-        "en": "ℹ️ <b>Help</b>\n\n🔑 Redeem Code — Redeem a giveaway code\n🎁 Daily Giveaway — View active giveaways\n📊 My Status — View your information\n⚙️ Settings — Change language\n\n🆘 Support: @{support}"
-    }
-}
-
-
-def get_lang(uid):
-    with db_lock:
-        conn = db()
-
-        row = conn.execute(
-            "SELECT language FROM user_lang WHERE user_id=?",
-            (uid,)
-        ).fetchone()
-
-        conn.close()
-
-    if row and row["language"] in ("bn", "en"):
-        return row["language"]
-
-    return "bn"
-
-
-def set_lang(uid, lang):
-    with db_lock:
-        conn = db()
-
-        conn.execute("""
-            INSERT INTO user_lang(user_id, language)
-            VALUES(?, ?)
-            ON CONFLICT(user_id)
-            DO UPDATE SET language=excluded.language
-        """, (uid, lang))
-
-        conn.execute("""
-            UPDATE users
-            SET language=?
-            WHERE user_id=?
-        """, (lang, uid))
-
-        conn.commit()
-        conn.close()
-
-
-def tr(uid, key, **kwargs):
-    lang = get_lang(uid)
-
-    data = TEXTS.get(key, {})
-    text = data.get(lang) or data.get("bn") or key
-
-    if kwargs:
-        try:
-            text = text.format(**kwargs)
-        except Exception:
-            pass
-
-    return text
-
-
-# =========================================================
-# USER
-# =========================================================
+# ============================================================
+# DATABASE HELPERS
+# ============================================================
 
 def save_user(user):
     now = utc_now()
 
     with db_lock:
-        conn = db()
+        conn = db_connect()
 
-        existing = conn.execute(
-            "SELECT user_id FROM users WHERE user_id=?",
-            (user.id,)
-        ).fetchone()
+        conn.execute("""
+            INSERT INTO users (
+                user_id,
+                username,
+                first_name,
+                last_name,
+                language,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, 'bn', ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username=excluded.username,
+                first_name=excluded.first_name,
+                last_name=excluded.last_name,
+                updated_at=excluded.updated_at
+        """, (
+            user.id,
+            user.username or "",
+            user.first_name or "",
+            user.last_name or "",
+            now,
+            now
+        ))
 
-        if existing:
-            conn.execute("""
-                UPDATE users
-                SET username=?,
-                    first_name=?,
-                    last_name=?,
-                    last_seen=?
-                WHERE user_id=?
-            """, (
-                user.username or "",
-                user.first_name or "",
-                user.last_name or "",
-                now,
-                user.id
-            ))
-        else:
-            conn.execute("""
-                INSERT INTO users(
-                    user_id,
-                    username,
-                    first_name,
-                    last_name,
-                    language,
-                    joined_at,
-                    last_seen
-                )
-                VALUES(?,?,?,?,?,?,?)
-            """, (
-                user.id,
-                user.username or "",
-                user.first_name or "",
-                user.last_name or "",
-                get_lang(user.id),
-                now,
-                now
-            ))
+        conn.execute("""
+            INSERT INTO user_settings(user_id, language, updated_at)
+            VALUES (?, 'bn', ?)
+            ON CONFLICT(user_id) DO NOTHING
+        """, (user.id, now))
 
         conn.commit()
         conn.close()
 
 
-def is_admin(uid):
-    return uid == ADMIN_ID
-
-
-def is_banned(uid):
+def get_user(user_id):
     with db_lock:
-        conn = db()
+        conn = db_connect()
+        row = conn.execute(
+            "SELECT * FROM users WHERE user_id=?",
+            (user_id,)
+        ).fetchone()
+        conn.close()
+        return row
+
+
+def is_banned(user_id):
+    row = get_user(user_id)
+    return bool(row and row["banned"])
+
+
+def set_banned(user_id, value):
+    with db_lock:
+        conn = db_connect()
+        conn.execute(
+            "UPDATE users SET banned=?, updated_at=? WHERE user_id=?",
+            (1 if value else 0, utc_now(), user_id)
+        )
+        conn.commit()
+        conn.close()
+
+
+def get_language(user_id):
+    with db_lock:
+        conn = db_connect()
 
         row = conn.execute(
-            "SELECT user_id FROM banned_users WHERE user_id=?",
-            (uid,)
+            "SELECT language FROM user_settings WHERE user_id=?",
+            (user_id,)
         ).fetchone()
 
         conn.close()
 
-    return row is not None
+    if row and row["language"]:
+        return row["language"]
+
+    return "bn"
 
 
-# =========================================================
-# FORCE JOIN
-# =========================================================
+def set_language(user_id, language):
+    if language not in ("bn", "en"):
+        language = "bn"
 
-def check_member(chat_username, uid):
+    with db_lock:
+        conn = db_connect()
+
+        conn.execute("""
+            INSERT INTO user_settings(user_id, language, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                language=excluded.language,
+                updated_at=excluded.updated_at
+        """, (user_id, language, utc_now()))
+
+        conn.execute(
+            "UPDATE users SET language=?, updated_at=? WHERE user_id=?",
+            (language, utc_now(), user_id)
+        )
+
+        conn.commit()
+        conn.close()
+
+
+# ============================================================
+# TRANSLATION
+# ============================================================
+
+TEXTS = {
+    "bn": {
+        "welcome": (
+            "🎉 <b>Rafim Giveaway Bot-এ স্বাগতম!</b>\n\n"
+            "🎁 বিভিন্ন Giveaway Code Redeem করতে পারবেন।\n"
+            "📢 আগে নিচের Channel ও Group-এ Join করুন।"
+        ),
+
+        "join_required":
+            "🔒 <b>আগে আমাদের Channel এবং Group-এ Join করুন।</b>\n\n"
+            "তারপর নিচের <b>✅ Verify</b> বাটনে চাপ দিন।",
+
+        "verified":
+            "🎉 <b>Verification সফল!</b>\n\n"
+            "এখন আপনি Bot-এর সব সুবিধা ব্যবহার করতে পারবেন।",
+
+        "verify_fail":
+            "❌ এখনও সব জায়গায় Join করা হয়নি।\n\n"
+            "দয়া করে Channel এবং Group দুটোতেই Join করে আবার Verify করুন।",
+
+        "redeem_prompt":
+            "🔑 <b>Redeem Code পাঠান:</b>\n\n"
+            "উদাহরণ: <code>GIVE-XXXXXXX</code>",
+
+        "invalid_code":
+            "❌ এই Redeem Code সঠিক নয় অথবা ইতিমধ্যে ব্যবহার হয়ে গেছে।",
+
+        "redeem_success":
+            "🎉 <b>Redeem Successful!</b>\n\n"
+            "🎁 আপনার Reward:\n<b>{reward}</b>\n\n"
+            "✅ এই Code সফলভাবে Redeem হয়েছে।",
+
+        "daily":
+            "🎁 <b>Daily Giveaway</b>\n\n"
+            "আজকের Giveaway পেতে Active Code ব্যবহার করুন।",
+
+        "status":
+            "📊 <b>My Status</b>\n\n"
+            "🆔 User ID: <code>{user_id}</code>\n"
+            "👤 Username: @{username}\n"
+            "🎁 Redeemed: {count}",
+
+        "help":
+            "ℹ️ <b>Help</b>\n\n"
+            "🔑 Redeem Code — Giveaway Code ব্যবহার করুন\n"
+            "🎁 Daily Giveaway — দৈনিক Giveaway দেখুন\n"
+            "📊 My Status — আপনার তথ্য দেখুন\n"
+            "⚙️ Settings — Language পরিবর্তন করুন\n\n"
+            "🆘 Support: @{support}",
+
+        "language_changed":
+            "✅ Language পরিবর্তন হয়েছে।",
+
+        "banned":
+            "🚫 আপনার অ্যাকাউন্টটি Bot থেকে নিষিদ্ধ করা হয়েছে।",
+
+        "admin_only":
+            "🚫 এই অপশন শুধুমাত্র Admin-এর জন্য।"
+    },
+
+    "en": {
+        "welcome": (
+            "🎉 <b>Welcome to Rafim Giveaway Bot!</b>\n\n"
+            "🎁 You can redeem Giveaway Codes here.\n"
+            "📢 Please join our Channel and Group first."
+        ),
+
+        "join_required":
+            "🔒 <b>Please join our Channel and Group first.</b>\n\n"
+            "Then press <b>✅ Verify</b>.",
+
+        "verified":
+            "🎉 <b>Verification successful!</b>\n\n"
+            "You can now use all bot features.",
+
+        "verify_fail":
+            "❌ You have not joined all required places yet.\n\n"
+            "Join both and press Verify again.",
+
+        "redeem_prompt":
+            "🔑 <b>Send your Redeem Code:</b>\n\n"
+            "Example: <code>GIVE-XXXXXXX</code>",
+
+        "invalid_code":
+            "❌ Invalid or already-used Redeem Code.",
+
+        "redeem_success":
+            "🎉 <b>Redeem Successful!</b>\n\n"
+            "🎁 Your Reward:\n<b>{reward}</b>\n\n"
+            "✅ This code has been redeemed successfully.",
+
+        "daily":
+            "🎁 <b>Daily Giveaway</b>\n\n"
+            "Use an active Giveaway Code to claim your reward.",
+
+        "status":
+            "📊 <b>My Status</b>\n\n"
+            "🆔 User ID: <code>{user_id}</code>\n"
+            "👤 Username: @{username}\n"
+            "🎁 Redeemed: {count}",
+
+        "help":
+            "ℹ️ <b>Help</b>\n\n"
+            "🔑 Redeem Code — Redeem a Giveaway Code\n"
+            "🎁 Daily Giveaway — Daily Giveaway\n"
+            "📊 My Status — Your information\n"
+            "⚙️ Settings — Change language\n\n"
+            "🆘 Support: @{support}",
+
+        "language_changed":
+            "✅ Language changed.",
+
+        "banned":
+            "🚫 Your account has been banned from this bot.",
+
+        "admin_only":
+            "🚫 Admin only."
+    }
+}
+
+
+def tr(user_id, key, **kwargs):
+    lang = get_language(user_id)
+
+    if lang not in TEXTS:
+        lang = "bn"
+
+    text = TEXTS[lang].get(key, TEXTS["bn"].get(key, key))
+
     try:
-        member = bot.get_chat_member(
-            chat_username,
-            uid
-        )
-
-        return member.status in (
-            "member",
-            "administrator",
-            "creator"
-        )
-
-    except Exception as e:
-        print(
-            f"Join check failed for {chat_username}: {e}"
-        )
-        return False
+        return text.format(**kwargs)
+    except Exception:
+        return text
 
 
-def joined_all(uid):
-    return (
-        check_member(CHANNEL_1, uid)
-        and check_member(GROUP_1, uid)
+# ============================================================
+# KEYBOARDS
+# ============================================================
+
+def main_keyboard(user_id):
+    lang = get_language(user_id)
+
+    kb = types.ReplyKeyboardMarkup(
+        resize_keyboard=True,
+        row_width=2
     )
+
+    if lang == "en":
+        kb.add(
+            types.KeyboardButton("🔑 Redeem Code"),
+            types.KeyboardButton("⚙️ Settings")
+        )
+        kb.add(
+            types.KeyboardButton("🎁 Daily Giveaway"),
+            types.KeyboardButton("📊 My Status")
+        )
+        kb.add(
+            types.KeyboardButton("ℹ️ Help")
+        )
+    else:
+        kb.add(
+            types.KeyboardButton("🔑 কোড রিডিম"),
+            types.KeyboardButton("⚙️ সেটিংস")
+        )
+        kb.add(
+            types.KeyboardButton("🎁 ডেইলি গিভঅ্যাওয়ে"),
+            types.KeyboardButton("📊 আমার স্ট্যাটাস")
+        )
+        kb.add(
+            types.KeyboardButton("ℹ️ সাহায্য")
+        )
+
+    if user_id == ADMIN_ID:
+        kb.add(types.KeyboardButton("🛠 Admin Panel"))
+
+    return kb
 
 
 def join_keyboard():
-    kb = types.InlineKeyboardMarkup(
-        row_width=1
-    )
+    kb = types.InlineKeyboardMarkup(row_width=1)
 
     kb.add(
         types.InlineKeyboardButton(
@@ -401,170 +547,8 @@ def join_keyboard():
     return kb
 
 
-# =========================================================
-# MAIN KEYBOARD
-# =========================================================
-
-def main_keyboard(uid):
-    lang = get_lang(uid)
-
-    kb = types.ReplyKeyboardMarkup(
-        resize_keyboard=True
-    )
-
-    if lang == "bn":
-        kb.row(
-            "🔑 কোড রিডিম",
-            "⚙️ সেটিংস"
-        )
-        kb.row(
-            "🎁 ডেইলি গিভঅ্যাওয়ে",
-            "📊 আমার স্ট্যাটাস"
-        )
-        kb.row("ℹ️ সাহায্য")
-    else:
-        kb.row(
-            "🔑 Redeem Code",
-            "⚙️ Settings"
-        )
-        kb.row(
-            "🎁 Daily Giveaway",
-            "📊 My Status"
-        )
-        kb.row("ℹ️ Help")
-
-    if is_admin(uid):
-        kb.row("👑 Admin Panel")
-
-    return kb
-
-
-# =========================================================
-# START
-# =========================================================
-
-@bot.message_handler(commands=["start"])
-def start_command(message):
-    uid = message.from_user.id
-
-    save_user(message.from_user)
-
-    if is_banned(uid):
-        bot.send_message(
-            message.chat.id,
-            "🚫 আপনার অ্যাকাউন্টটি Block করা আছে।"
-        )
-        return
-
-    if not joined_all(uid):
-        bot.send_message(
-            message.chat.id,
-            tr(uid, "join_required"),
-            reply_markup=join_keyboard()
-        )
-        return
-
-    bot.send_message(
-        message.chat.id,
-        tr(uid, "welcome"),
-        reply_markup=main_keyboard(uid)
-    )
-
-
-# =========================================================
-# VERIFY
-# =========================================================
-
-@bot.callback_query_handler(
-    func=lambda call: call.data == "verify_join"
-)
-def verify_join(call):
-    uid = call.from_user.id
-
-    if joined_all(uid):
-
-        bot.answer_callback_query(
-            call.id,
-            "Verification successful!",
-            show_alert=True
-        )
-
-        try:
-            bot.edit_message_text(
-                tr(uid, "join_success"),
-                call.message.chat.id,
-                call.message.message_id
-            )
-        except Exception:
-            pass
-
-        bot.send_message(
-            call.message.chat.id,
-            "🏠 Main Menu",
-            reply_markup=main_keyboard(uid)
-        )
-
-        with db_lock:
-            conn = db()
-
-            row = conn.execute(
-                "SELECT alert_sent FROM users WHERE user_id=?",
-                (uid,)
-            ).fetchone()
-
-            should_alert = (
-                row is not None
-                and row["alert_sent"] == 0
-            )
-
-            if should_alert:
-                conn.execute(
-                    "UPDATE users SET alert_sent=1 WHERE user_id=?",
-                    (uid,)
-                )
-
-            conn.commit()
-            conn.close()
-
-        if should_alert and ADMIN_ID:
-            username = (
-                f"@{call.from_user.username}"
-                if call.from_user.username
-                else "No username"
-            )
-
-            try:
-                bot.send_message(
-                    ADMIN_ID,
-                    "🆕 <b>New User Verified</b>\n\n"
-                    f"👤 {username}\n"
-                    f"🆔 <code>{uid}</code>"
-                )
-            except Exception as e:
-                print("Admin alert failed:", e)
-
-    else:
-        bot.answer_callback_query(
-            call.id,
-            tr(uid, "not_joined"),
-            show_alert=True
-        )
-
-
-# =========================================================
-# SETTINGS
-# =========================================================
-
-@bot.message_handler(
-    func=lambda m: m.text in (
-        "⚙️ সেটিংস",
-        "⚙️ Settings"
-    )
-)
-def settings(message):
-    kb = types.InlineKeyboardMarkup(
-        row_width=2
-    )
+def language_keyboard():
+    kb = types.InlineKeyboardMarkup(row_width=2)
 
     kb.add(
         types.InlineKeyboardButton(
@@ -577,10 +561,536 @@ def settings(message):
         )
     )
 
+    return kb
+
+
+def admin_keyboard():
+    kb = types.ReplyKeyboardMarkup(
+        resize_keyboard=True,
+        row_width=2
+    )
+
+    kb.add(
+        types.KeyboardButton("🎁 Add Giveaway"),
+        types.KeyboardButton("📋 Active Codes")
+    )
+
+    kb.add(
+        types.KeyboardButton("📊 Statistics"),
+        types.KeyboardButton("📢 Broadcast")
+    )
+
+    kb.add(
+        types.KeyboardButton("❌ Cancel Broadcast"),
+        types.KeyboardButton("💬 Direct User Chat")
+    )
+
+    kb.add(
+        types.KeyboardButton("👤 User Menu"),
+        types.KeyboardButton("🏠 Main Menu")
+    )
+
+    return kb
+
+
+# ============================================================
+# FORCE JOIN
+# ============================================================
+
+def check_member(chat_username, user_id):
+    try:
+        member = bot.get_chat_member(
+            chat_username,
+            user_id
+        )
+
+        return member.status in (
+            "member",
+            "administrator",
+            "creator"
+        )
+
+    except Exception as e:
+        print(
+            f"Join check failed: "
+            f"{chat_username} / {user_id} / {repr(e)}"
+        )
+        return False
+
+
+def joined_all(user_id):
+    channel_ok = check_member(
+        CHANNEL_1,
+        user_id
+    )
+
+    group_ok = check_member(
+        GROUP_1,
+        user_id
+    )
+
+    return channel_ok and group_ok
+
+
+# ============================================================
+# STATES
+# ============================================================
+
+user_states = {}
+admin_states = {}
+
+broadcast_cancel_event = threading.Event()
+
+
+# ============================================================
+# ADMIN CHECK
+# ============================================================
+
+def is_admin(user_id):
+    return user_id == ADMIN_ID
+
+
+# ============================================================
+# CODE GENERATOR
+# ============================================================
+
+def generate_code():
+    alphabet = string.ascii_uppercase + string.digits
+
+    while True:
+        code = "GIVE-" + "".join(
+            secrets.choice(alphabet)
+            for _ in range(8)
+        )
+
+        with db_lock:
+            conn = db_connect()
+            row = conn.execute(
+                "SELECT id FROM giveaways WHERE redeem_code=?",
+                (code,)
+            ).fetchone()
+            conn.close()
+
+        if not row:
+            return code
+
+
+# ============================================================
+# GIVEAWAY FUNCTIONS
+# ============================================================
+
+def create_giveaway(reward_text, category="Giveaway"):
+    code = generate_code()
+
+    with db_lock:
+        conn = db_connect()
+
+        conn.execute("""
+            INSERT INTO giveaways (
+                redeem_code,
+                reward_text,
+                category,
+                status,
+                created_at
+            )
+            VALUES (?, ?, ?, 'active', ?)
+        """, (
+            code,
+            reward_text,
+            category,
+            utc_now()
+        ))
+
+        conn.commit()
+        conn.close()
+
+    return code
+
+
+def redeem_code(user_id, code):
+    code = code.strip().upper()
+
+    with db_lock:
+        conn = db_connect()
+
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+
+            row = conn.execute("""
+                SELECT *
+                FROM giveaways
+                WHERE redeem_code=?
+                AND status='active'
+                LIMIT 1
+            """, (code,)).fetchone()
+
+            if not row:
+                conn.rollback()
+                conn.close()
+                return None
+
+            updated = conn.execute("""
+                UPDATE giveaways
+                SET status='used',
+                    used_by=?,
+                    used_at=?
+                WHERE id=?
+                AND status='active'
+            """, (
+                user_id,
+                utc_now(),
+                row["id"]
+            )).rowcount
+
+            if updated != 1:
+                conn.rollback()
+                conn.close()
+                return None
+
+            conn.execute("""
+                INSERT INTO redemptions (
+                    user_id,
+                    redeem_code,
+                    reward_text,
+                    redeemed_at
+                )
+                VALUES (?, ?, ?, ?)
+            """, (
+                user_id,
+                code,
+                row["reward_text"],
+                utc_now()
+            ))
+
+            conn.commit()
+
+            reward = row["reward_text"]
+
+            conn.close()
+
+            return reward
+
+        except Exception:
+            conn.rollback()
+            conn.close()
+            raise
+
+
+# ============================================================
+# START
+# ============================================================
+
+@bot.message_handler(commands=["start"])
+def start_command(message):
+    try:
+        save_user(message.from_user)
+
+        uid = message.from_user.id
+
+        if is_banned(uid):
+            bot.send_message(
+                message.chat.id,
+                tr(uid, "banned")
+            )
+            return
+
+        if not joined_all(uid):
+            bot.send_message(
+                message.chat.id,
+                tr(uid, "join_required"),
+                reply_markup=join_keyboard()
+            )
+            return
+
+        with db_lock:
+            conn = db_connect()
+
+            conn.execute("""
+                UPDATE users
+                SET joined_verified=1,
+                    updated_at=?
+                WHERE user_id=?
+            """, (utc_now(), uid))
+
+            conn.commit()
+            conn.close()
+
+        bot.send_message(
+            message.chat.id,
+            tr(uid, "welcome"),
+            reply_markup=main_keyboard(uid)
+        )
+
+        send_admin_join_alert(message.from_user)
+
+    except Exception:
+        print("START HANDLER ERROR:")
+        traceback.print_exc()
+
+
+# ============================================================
+# ADMIN ALERT
+# ============================================================
+
+def send_admin_join_alert(user):
+    if ADMIN_ID == 0:
+        return
+
+    try:
+        with db_lock:
+            conn = db_connect()
+
+            row = conn.execute("""
+                SELECT alert_sent
+                FROM users
+                WHERE user_id=?
+            """, (user.id,)).fetchone()
+
+            if not row:
+                conn.close()
+                return
+
+            if row["alert_sent"]:
+                conn.close()
+                return
+
+            conn.execute("""
+                UPDATE users
+                SET alert_sent=1,
+                    updated_at=?
+                WHERE user_id=?
+            """, (utc_now(), user.id))
+
+            conn.commit()
+            conn.close()
+
+        username = (
+            f"@{user.username}"
+            if user.username
+            else "No username"
+        )
+
+        text = (
+            "🎉 <b>New Verified User</b>\n\n"
+            f"👤 {username}\n"
+            f"🆔 <code>{user.id}</code>\n"
+            f"📛 {user.first_name or ''}"
+        )
+
+        bot.send_message(
+            ADMIN_ID,
+            text
+        )
+
+    except Exception:
+        traceback.print_exc()
+
+
+# ============================================================
+# VERIFY
+# ============================================================
+
+@bot.callback_query_handler(
+    func=lambda call: call.data == "verify_join"
+)
+def verify_join(call):
+    uid = call.from_user.id
+
+    try:
+        save_user(call.from_user)
+
+        if is_banned(uid):
+            bot.answer_callback_query(
+                call.id,
+                "🚫 Banned"
+            )
+            return
+
+        if joined_all(uid):
+            with db_lock:
+                conn = db_connect()
+
+                conn.execute("""
+                    UPDATE users
+                    SET joined_verified=1,
+                        updated_at=?
+                    WHERE user_id=?
+                """, (utc_now(), uid))
+
+                conn.commit()
+                conn.close()
+
+            bot.answer_callback_query(
+                call.id,
+                "✅ Verified!"
+            )
+
+            try:
+                bot.edit_message_text(
+                    tr(uid, "verified"),
+                    call.message.chat.id,
+                    call.message.message_id
+                )
+            except Exception:
+                pass
+
+            bot.send_message(
+                call.message.chat.id,
+                tr(uid, "welcome"),
+                reply_markup=main_keyboard(uid)
+            )
+
+            send_admin_join_alert(call.from_user)
+
+        else:
+            bot.answer_callback_query(
+                call.id,
+                "❌ Join both first",
+                show_alert=True
+            )
+
+    except Exception:
+        traceback.print_exc()
+
+
+# ============================================================
+# REDEEM
+# ============================================================
+
+@bot.message_handler(
+    func=lambda m: m.text in (
+        "🔑 কোড রিডিম",
+        "🔑 Redeem Code"
+    )
+)
+def redeem_button(message):
+    uid = message.from_user.id
+
+    if is_banned(uid):
+        bot.send_message(
+            message.chat.id,
+            tr(uid, "banned")
+        )
+        return
+
+    if not joined_all(uid):
+        bot.send_message(
+            message.chat.id,
+            tr(uid, "join_required"),
+            reply_markup=join_keyboard()
+        )
+        return
+
+    user_states[uid] = "redeem"
+
     bot.send_message(
         message.chat.id,
-        "⚙️ <b>Language / ভাষা</b>",
-        reply_markup=kb
+        tr(uid, "redeem_prompt")
+    )
+
+
+# ============================================================
+# DAILY
+# ============================================================
+
+@bot.message_handler(
+    func=lambda m: m.text in (
+        "🎁 ডেইলি গিভঅ্যাওয়ে",
+        "🎁 Daily Giveaway"
+    )
+)
+def daily_button(message):
+    uid = message.from_user.id
+
+    if is_banned(uid):
+        bot.send_message(
+            message.chat.id,
+            tr(uid, "banned")
+        )
+        return
+
+    bot.send_message(
+        message.chat.id,
+        tr(uid, "daily")
+    )
+
+
+# ============================================================
+# STATUS
+# ============================================================
+
+@bot.message_handler(
+    func=lambda m: m.text in (
+        "📊 আমার স্ট্যাটাস",
+        "📊 My Status"
+    )
+)
+def status_button(message):
+    uid = message.from_user.id
+
+    with db_lock:
+        conn = db_connect()
+
+        row = conn.execute("""
+            SELECT COUNT(*) AS total
+            FROM redemptions
+            WHERE user_id=?
+        """, (uid,)).fetchone()
+
+        conn.close()
+
+    username = message.from_user.username or "none"
+
+    bot.send_message(
+        message.chat.id,
+        tr(
+            uid,
+            "status",
+            user_id=uid,
+            username=username,
+            count=row["total"]
+        )
+    )
+
+
+# ============================================================
+# HELP
+# ============================================================
+
+@bot.message_handler(
+    func=lambda m: m.text in (
+        "ℹ️ সাহায্য",
+        "ℹ️ Help"
+    )
+)
+def help_button(message):
+    uid = message.from_user.id
+
+    bot.send_message(
+        message.chat.id,
+        tr(
+            uid,
+            "help",
+            support=SUPPORT_USERNAME
+        )
+    )
+
+
+# ============================================================
+# SETTINGS
+# ============================================================
+
+@bot.message_handler(
+    func=lambda m: m.text in (
+        "⚙️ সেটিংস",
+        "⚙️ Settings"
+    )
+)
+def settings_button(message):
+    bot.send_message(
+        message.chat.id,
+        "🌐 <b>Select Language / ভাষা নির্বাচন করুন</b>",
+        reply_markup=language_keyboard()
     )
 
 
@@ -590,394 +1100,98 @@ def settings(message):
         "lang_en"
     )
 )
-def change_language(call):
-    lang = (
+def language_callback(call):
+    uid = call.from_user.id
+
+    language = (
         "bn"
         if call.data == "lang_bn"
         else "en"
     )
 
-    set_lang(
-        call.from_user.id,
-        lang
-    )
+    set_language(uid, language)
 
     bot.answer_callback_query(
         call.id,
-        "Language updated!"
+        "✅"
     )
 
     bot.send_message(
         call.message.chat.id,
-        "✅ Language updated.",
-        reply_markup=main_keyboard(
-            call.from_user.id
-        )
+        tr(uid, "language_changed"),
+        reply_markup=main_keyboard(uid)
     )
 
 
-# =========================================================
-# REDEEM
-# =========================================================
+# ============================================================
+# ADMIN PANEL
+# ============================================================
 
 @bot.message_handler(
-    func=lambda m: m.text in (
-        "🔑 কোড রিডিম",
-        "🔑 Redeem Code"
-    )
+    commands=["admin"]
 )
-def redeem_start(message):
-    uid = message.from_user.id
-
-    redeem_waiting.add(uid)
-
-    bot.send_message(
-        message.chat.id,
-        tr(uid, "redeem_prompt")
-    )
-
-
-@bot.message_handler(
-    func=lambda m: m.from_user.id in redeem_waiting
-)
-def redeem_process(message):
-    uid = message.from_user.id
-
-    redeem_waiting.discard(uid)
-
-    code = (
-        message.text or ""
-    ).strip().upper()
-
-    with db_lock:
-        conn = db()
-
-        row = conn.execute("""
-            SELECT *
-            FROM giveaways
-            WHERE redeem_code=?
-              AND status='active'
-        """, (code,)).fetchone()
-
-        if not row:
-            conn.close()
-
-            bot.send_message(
-                message.chat.id,
-                tr(uid, "invalid_code")
-            )
-            return
-
-        cur = conn.execute("""
-            UPDATE giveaways
-            SET status='used',
-                used_by=?,
-                used_at=?
-            WHERE redeem_code=?
-              AND status='active'
-        """, (
-            uid,
-            utc_now(),
-            code
-        ))
-
-        if cur.rowcount != 1:
-            conn.rollback()
-            conn.close()
-
-            bot.send_message(
-                message.chat.id,
-                "⚠️ এই Code ইতিমধ্যে Redeem করা হয়েছে।"
-            )
-            return
-
-        conn.execute("""
-            INSERT INTO redemptions(
-                user_id,
-                redeem_code,
-                reward_text
-            )
-            VALUES(?,?,?)
-        """, (
-            uid,
-            code,
-            row["reward_text"]
-        ))
-
-        conn.commit()
-        conn.close()
-
-    bot.send_message(
-        message.chat.id,
-        tr(
-            uid,
-            "redeem_success",
-            reward=row["reward_text"]
-        )
-    )
-
-
-# =========================================================
-# DAILY GIVEAWAY
-# =========================================================
-
-@bot.message_handler(
-    func=lambda m: m.text in (
-        "🎁 ডেইলি গিভঅ্যাওয়ে",
-        "🎁 Daily Giveaway"
-    )
-)
-def daily_giveaway(message):
-    uid = message.from_user.id
-
-    with db_lock:
-        conn = db()
-
-        rows = conn.execute("""
-            SELECT redeem_code,
-                   reward_text,
-                   category
-            FROM giveaways
-            WHERE status='active'
-            ORDER BY id DESC
-            LIMIT 20
-        """).fetchall()
-
-        conn.close()
-
-    if not rows:
-        bot.send_message(
-            message.chat.id,
-            "😔 বর্তমানে কোনো Active Giveaway নেই।"
-        )
-        return
-
-    text = (
-        tr(uid, "daily")
-        + "\n\n"
-    )
-
-    for i, row in enumerate(rows, 1):
-        text += (
-            f"🎁 <b>{i}. {row['category']}</b>\n"
-            f"🔑 <code>{row['redeem_code']}</code>\n"
-            f"🏆 {row['reward_text']}\n\n"
-        )
-
-    bot.send_message(
-        message.chat.id,
-        text
-    )
-
-
-# =========================================================
-# STATUS
-# =========================================================
-
-@bot.message_handler(
-    func=lambda m: m.text in (
-        "📊 আমার স্ট্যাটাস",
-        "📊 My Status"
-    )
-)
-def my_status(message):
-    uid = message.from_user.id
-
-    with db_lock:
-        conn = db()
-
-        row = conn.execute("""
-            SELECT COUNT(*) AS c
-            FROM redemptions
-            WHERE user_id=?
-        """, (uid,)).fetchone()
-
-        conn.close()
-
-    bot.send_message(
-        message.chat.id,
-        tr(
-            uid,
-            "status",
-            uid=uid,
-            count=row["c"]
-        )
-    )
-
-
-# =========================================================
-# HELP
-# =========================================================
-
-@bot.message_handler(
-    func=lambda m: m.text in (
-        "ℹ️ সাহায্য",
-        "ℹ️ Help"
-    )
-)
-def help_command(message):
-    bot.send_message(
-        message.chat.id,
-        tr(
-            message.from_user.id,
-            "help",
-            support=SUPPORT_USERNAME
-        )
-    )
-
-
-# =========================================================
-# ADMIN KEYBOARD
-# =========================================================
-
-def admin_keyboard():
-    kb = types.ReplyKeyboardMarkup(
-        resize_keyboard=True
-    )
-
-    kb.row(
-        "🎁 Add Giveaway",
-        "📋 Active Codes"
-    )
-
-    kb.row(
-        "📊 Statistics",
-        "📢 Broadcast"
-    )
-
-    kb.row(
-        "❌ Cancel Broadcast",
-        "💬 Direct User Chat"
-    )
-
-    kb.row(
-        "👥 User Menu",
-        "🏠 Main Menu"
-    )
-
-    return kb
-
-
-# =========================================================
-# ADMIN
-# =========================================================
-
-@bot.message_handler(commands=["admin"])
 def admin_command(message):
     if not is_admin(message.from_user.id):
+        bot.send_message(
+            message.chat.id,
+            tr(message.from_user.id, "admin_only")
+        )
         return
-
-    admin_state.pop(
-        message.from_user.id,
-        None
-    )
 
     bot.send_message(
         message.chat.id,
-        "👑 <b>Admin Panel</b>",
+        "🛠 <b>Admin Panel</b>",
         reply_markup=admin_keyboard()
     )
 
 
 @bot.message_handler(
     func=lambda m:
-    is_admin(m.from_user.id)
-    and m.text == "👑 Admin Panel"
+        m.text == "🛠 Admin Panel"
 )
-def admin_panel_button(message):
+def admin_button(message):
     admin_command(message)
 
 
-@bot.message_handler(commands=["users"])
-def users_command(message):
+# ============================================================
+# ADD GIVEAWAY
+# ============================================================
+
+@bot.message_handler(
+    func=lambda m:
+        m.text == "🎁 Add Giveaway"
+)
+def add_giveaway_button(message):
+    if not is_admin(message.from_user.id):
+        return
+
+    admin_states[message.from_user.id] = "add_giveaway"
+
+    bot.send_message(
+        message.chat.id,
+        "🎁 <b>Reward / Token Text পাঠান:</b>\n\n"
+        "উদাহরণ:\n"
+        "<code>Premium 7 Days</code>"
+    )
+
+
+# ============================================================
+# ACTIVE CODES
+# ============================================================
+
+@bot.message_handler(
+    func=lambda m:
+        m.text == "📋 Active Codes"
+)
+def active_codes(message):
     if not is_admin(message.from_user.id):
         return
 
     with db_lock:
-        conn = db()
-
-        total = conn.execute(
-            "SELECT COUNT(*) AS c FROM users"
-        ).fetchone()["c"]
-
-        conn.close()
-
-    bot.send_message(
-        message.chat.id,
-        f"👥 <b>Total Users:</b> {total}"
-    )
-
-
-# =========================================================
-# ADD GIVEAWAY
-# =========================================================
-
-@bot.message_handler(
-    func=lambda m:
-    is_admin(m.from_user.id)
-    and m.text == "🎁 Add Giveaway"
-)
-def add_giveaway_start(message):
-    admin_state[
-        message.from_user.id
-    ] = {
-        "state": "reward"
-    }
-
-    bot.send_message(
-        message.chat.id,
-        "🎁 <b>Reward / Token লিখুন:</b>\n\n"
-        "উদাহরণ:\n"
-        "<code>Netflix Premium 1 Month</code>"
-    )
-
-
-def generate_code():
-    alphabet = (
-        string.ascii_uppercase
-        + string.digits
-    )
-
-    while True:
-        code = (
-            "GIVE-"
-            + "".join(
-                secrets.choice(alphabet)
-                for _ in range(8)
-            )
-        )
-
-        with db_lock:
-            conn = db()
-
-            row = conn.execute(
-                "SELECT id FROM giveaways WHERE redeem_code=?",
-                (code,)
-            ).fetchone()
-
-            conn.close()
-
-        if not row:
-            return code
-
-
-# =========================================================
-# ACTIVE CODES
-# =========================================================
-
-@bot.message_handler(
-    func=lambda m:
-    is_admin(m.from_user.id)
-    and m.text == "📋 Active Codes"
-)
-def active_codes(message):
-    with db_lock:
-        conn = db()
+        conn = db_connect()
 
         rows = conn.execute("""
-            SELECT redeem_code,
-                   reward_text,
-                   category
+            SELECT redeem_code, reward_text, created_at
             FROM giveaways
             WHERE status='active'
             ORDER BY id DESC
@@ -989,11 +1203,11 @@ def active_codes(message):
     if not rows:
         bot.send_message(
             message.chat.id,
-            "📭 কোনো Active Code নেই।"
+            "📭 কোনো Active Giveaway Code নেই।"
         )
         return
 
-    text = "📋 <b>Active Codes</b>\n\n"
+    text = "📋 <b>Active Giveaway Codes</b>\n\n"
 
     for row in rows:
         text += (
@@ -1007,18 +1221,20 @@ def active_codes(message):
     )
 
 
-# =========================================================
+# ============================================================
 # STATISTICS
-# =========================================================
+# ============================================================
 
 @bot.message_handler(
     func=lambda m:
-    is_admin(m.from_user.id)
-    and m.text == "📊 Statistics"
+        m.text == "📊 Statistics"
 )
 def statistics(message):
+    if not is_admin(message.from_user.id):
+        return
+
     with db_lock:
-        conn = db()
+        conn = db_connect()
 
         users = conn.execute(
             "SELECT COUNT(*) AS c FROM users"
@@ -1036,306 +1252,200 @@ def statistics(message):
             WHERE status='used'
         """).fetchone()["c"]
 
-        redeemed = conn.execute(
+        redemptions = conn.execute(
             "SELECT COUNT(*) AS c FROM redemptions"
         ).fetchone()["c"]
 
         conn.close()
 
-    bot.send_message(
-        message.chat.id,
+    text = (
         "📊 <b>Bot Statistics</b>\n\n"
         f"👥 Users: <b>{users}</b>\n"
         f"🎁 Active Codes: <b>{active}</b>\n"
         f"✅ Used Codes: <b>{used}</b>\n"
-        f"🔑 Total Redeems: <b>{redeemed}</b>"
+        f"🔑 Redemptions: <b>{redemptions}</b>"
     )
-
-
-# =========================================================
-# DIRECT USER CHAT
-# =========================================================
-
-@bot.message_handler(
-    func=lambda m:
-    is_admin(m.from_user.id)
-    and m.text == "💬 Direct User Chat"
-)
-def direct_chat_start(message):
-    admin_state[
-        message.from_user.id
-    ] = {
-        "state": "direct_user"
-    }
 
     bot.send_message(
         message.chat.id,
-        "💬 User ID পাঠান:"
+        text
     )
 
 
-# =========================================================
+# ============================================================
 # USER MENU
-# =========================================================
+# ============================================================
 
 @bot.message_handler(
     func=lambda m:
-    is_admin(m.from_user.id)
-    and m.text == "👥 User Menu"
+        m.text == "👤 User Menu"
 )
 def user_menu(message):
+    if not is_admin(message.from_user.id):
+        return
+
     bot.send_message(
         message.chat.id,
-        "👥 <b>User Management</b>\n\n"
+        "👤 User Management\n\n"
+        "ব্যবহার করুন:\n"
         "/users\n"
         "/ban USER_ID\n"
         "/unban USER_ID"
     )
 
 
-# =========================================================
-# BAN
-# =========================================================
-
-@bot.message_handler(commands=["ban"])
-def ban_user(message):
-    if not is_admin(message.from_user.id):
-        return
-
-    parts = message.text.split()
-
-    if len(parts) != 2:
-        bot.send_message(
-            message.chat.id,
-            "ব্যবহার: <code>/ban USER_ID</code>"
-        )
-        return
-
-    try:
-        uid = int(parts[1])
-    except ValueError:
-        bot.send_message(
-            message.chat.id,
-            "❌ Invalid User ID."
-        )
-        return
-
-    with db_lock:
-        conn = db()
-
-        conn.execute("""
-            INSERT OR IGNORE INTO banned_users(user_id)
-            VALUES(?)
-        """, (uid,))
-
-        conn.commit()
-        conn.close()
-
-    bot.send_message(
-        message.chat.id,
-        f"🚫 User <code>{uid}</code> banned."
-    )
-
-
-# =========================================================
-# UNBAN
-# =========================================================
-
-@bot.message_handler(commands=["unban"])
-def unban_user(message):
-    if not is_admin(message.from_user.id):
-        return
-
-    parts = message.text.split()
-
-    if len(parts) != 2:
-        bot.send_message(
-            message.chat.id,
-            "ব্যবহার: <code>/unban USER_ID</code>"
-        )
-        return
-
-    try:
-        uid = int(parts[1])
-    except ValueError:
-        bot.send_message(
-            message.chat.id,
-            "❌ Invalid User ID."
-        )
-        return
-
-    with db_lock:
-        conn = db()
-
-        conn.execute(
-            "DELETE FROM banned_users WHERE user_id=?",
-            (uid,)
-        )
-
-        conn.commit()
-        conn.close()
-
-    bot.send_message(
-        message.chat.id,
-        f"✅ User <code>{uid}</code> unbanned."
-    )
-
-
-# =========================================================
-# ADMIN STATE HANDLER
-# =========================================================
+# ============================================================
+# USERS
+# ============================================================
 
 @bot.message_handler(
-    func=lambda m: (
-        is_admin(m.from_user.id)
-        and m.from_user.id in admin_state
-    )
+    commands=["users"]
 )
-def admin_state_handler(message):
-    uid = message.from_user.id
-
-    state_data = admin_state.get(uid, {})
-    state = state_data.get("state")
-
-    # ---------------------------
-    # REWARD
-    # ---------------------------
-
-    if state == "reward":
-
-        reward = (
-            message.text or ""
-        ).strip()
-
-        if not reward:
-            bot.send_message(
-                message.chat.id,
-                "❌ Reward empty হতে পারবে না।"
-            )
-            return
-
-        code = generate_code()
-
-        with db_lock:
-            conn = db()
-
-            conn.execute("""
-                INSERT INTO giveaways(
-                    redeem_code,
-                    reward_text,
-                    category,
-                    status
-                )
-                VALUES(?,?,?,?)
-            """, (
-                code,
-                reward,
-                "Giveaway",
-                "active"
-            ))
-
-            conn.commit()
-            conn.close()
-
-        admin_state.pop(
-            uid,
-            None
-        )
-
-        bot.send_message(
-            message.chat.id,
-            "✅ <b>Giveaway Created!</b>\n\n"
-            f"🎁 Reward:\n{reward}\n\n"
-            f"🔑 Code:\n<code>{code}</code>\n\n"
-            "📢 User এই Code একবার Redeem করতে পারবে।",
-            reply_markup=admin_keyboard()
-        )
-
+def users_command(message):
+    if not is_admin(message.from_user.id):
         return
 
-    # ---------------------------
-    # DIRECT USER ID
-    # ---------------------------
+    with db_lock:
+        conn = db_connect()
 
-    if state == "direct_user":
+        rows = conn.execute("""
+            SELECT user_id, username, first_name, banned
+            FROM users
+            ORDER BY created_at DESC
+            LIMIT 50
+        """).fetchall()
 
-        try:
-            target_id = int(
-                message.text.strip()
-            )
-        except Exception:
-            bot.send_message(
-                message.chat.id,
-                "❌ সঠিক User ID দিন।"
-            )
-            return
+        conn.close()
 
-        admin_state[uid] = {
-            "state": "direct_message",
-            "target_id": target_id
-        }
-
+    if not rows:
         bot.send_message(
             message.chat.id,
-            f"💬 User <code>{target_id}</code>-কে Message লিখুন:"
+            "📭 No users."
         )
-
         return
 
-    # ---------------------------
-    # DIRECT MESSAGE
-    # ---------------------------
+    text = "👥 <b>Users</b>\n\n"
 
-    if state == "direct_message":
-
-        target_id = state_data.get(
-            "target_id"
+    for row in rows:
+        username = (
+            "@" + row["username"]
+            if row["username"]
+            else "No username"
         )
 
-        text = message.text or ""
-
-        try:
-            bot.send_message(
-                target_id,
-                "📩 <b>Message from Admin</b>\n\n"
-                + text
-            )
-
-            bot.send_message(
-                message.chat.id,
-                "✅ Message sent."
-            )
-
-        except Exception as e:
-            bot.send_message(
-                message.chat.id,
-                "❌ Message failed.\n"
-                f"<code>{str(e)[:500]}</code>"
-            )
-
-        admin_state.pop(
-            uid,
-            None
+        status = (
+            "🚫 Banned"
+            if row["banned"]
+            else "✅ Active"
         )
 
+        text += (
+            f"🆔 <code>{row['user_id']}</code>\n"
+            f"👤 {username}\n"
+            f"📛 {row['first_name'] or ''}\n"
+            f"{status}\n\n"
+        )
 
-# =========================================================
-# BROADCAST
-# =========================================================
+    bot.send_message(
+        message.chat.id,
+        text
+    )
+
+
+# ============================================================
+# BAN / UNBAN
+# ============================================================
+
+@bot.message_handler(
+    commands=["ban", "unban"]
+)
+def ban_command(message):
+    if not is_admin(message.from_user.id):
+        return
+
+    parts = message.text.split()
+
+    if len(parts) != 2:
+        bot.send_message(
+            message.chat.id,
+            "ব্যবহার:\n"
+            "/ban USER_ID\n"
+            "/unban USER_ID"
+        )
+        return
+
+    try:
+        uid = int(parts[1])
+    except Exception:
+        bot.send_message(
+            message.chat.id,
+            "❌ Invalid User ID."
+        )
+        return
+
+    value = message.text.startswith("/ban")
+
+    set_banned(uid, value)
+
+    bot.send_message(
+        message.chat.id,
+        "🚫 User banned."
+        if value
+        else "✅ User unbanned."
+    )
+
+
+# ============================================================
+# DIRECT CHAT
+# ============================================================
 
 @bot.message_handler(
     func=lambda m:
-    is_admin(m.from_user.id)
-    and m.text == "📢 Broadcast"
+        m.text == "💬 Direct User Chat"
 )
-def broadcast_start(message):
+def direct_chat_button(message):
+    if not is_admin(message.from_user.id):
+        return
 
-    broadcast_state[
-        message.from_user.id
-    ] = {
-        "waiting": True,
-        "running": False
-    }
+    admin_states[message.from_user.id] = "direct_user_id"
+
+    bot.send_message(
+        message.chat.id,
+        "💬 যে User ID-তে message পাঠাতে চান সেটি পাঠান।"
+    )
+
+
+# ============================================================
+# END CHAT
+# ============================================================
+
+@bot.message_handler(
+    commands=["endchat"]
+)
+def endchat_command(message):
+    admin_states.pop(message.from_user.id, None)
+
+    bot.send_message(
+        message.chat.id,
+        "✅ Direct Chat বন্ধ হয়েছে।"
+    )
+
+
+# ============================================================
+# BROADCAST
+# ============================================================
+
+@bot.message_handler(
+    func=lambda m:
+        m.text == "📢 Broadcast"
+)
+def broadcast_button(message):
+    if not is_admin(message.from_user.id):
+        return
+
+    admin_states[message.from_user.id] = "broadcast"
+
+    broadcast_cancel_event.clear()
 
     bot.send_message(
         message.chat.id,
@@ -1346,330 +1456,498 @@ def broadcast_start(message):
 
 @bot.message_handler(
     func=lambda m:
-    is_admin(m.from_user.id)
-    and m.text == "❌ Cancel Broadcast"
+        m.text == "❌ Cancel Broadcast"
 )
-def cancel_broadcast(message):
+def cancel_broadcast_button(message):
+    if not is_admin(message.from_user.id):
+        return
 
-    uid = message.from_user.id
-
-    if uid in broadcast_state:
-        broadcast_state[uid]["running"] = False
-        broadcast_state.pop(uid, None)
+    broadcast_cancel_event.set()
 
     bot.send_message(
         message.chat.id,
-        "🛑 Broadcast cancelled."
+        "⛔ Broadcast cancel signal পাঠানো হয়েছে।"
     )
 
 
-def perform_broadcast(
-    admin_id,
-    message_text,
-    admin_chat_id
-):
+@bot.message_handler(
+    commands=["cancel"]
+)
+def cancel_command(message):
+    if not is_admin(message.from_user.id):
+        return
+
+    admin_states.pop(message.from_user.id, None)
+
+    broadcast_cancel_event.set()
+
+    bot.send_message(
+        message.chat.id,
+        "❌ Current operation cancelled."
+    )
+
+
+def run_broadcast(admin_id, message_text, status_chat_id):
+    broadcast_cancel_event.clear()
+
     with db_lock:
-        conn = db()
+        conn = db_connect()
 
-        rows = conn.execute(
-            "SELECT user_id FROM users"
-        ).fetchall()
+        users = conn.execute("""
+            SELECT user_id
+            FROM users
+            WHERE banned=0
+            ORDER BY user_id
+        """).fetchall()
 
+        cur = conn.execute("""
+            INSERT INTO broadcast_jobs (
+                admin_id,
+                message_text,
+                status,
+                total,
+                created_at
+            )
+            VALUES (?, ?, 'running', ?, ?)
+        """, (
+            admin_id,
+            message_text,
+            len(users),
+            utc_now()
+        ))
+
+        job_id = cur.lastrowid
+
+        conn.commit()
         conn.close()
 
-    total = len(rows)
     sent = 0
     failed = 0
 
-    for row in rows:
+    total = len(users)
 
-        state = broadcast_state.get(
-            admin_id
-        )
+    for index, row in enumerate(users, start=1):
 
-        if not state or not state.get(
-            "running",
-            False
-        ):
+        if broadcast_cancel_event.is_set():
+            status = "cancelled"
             break
 
-        target_id = row["user_id"]
+        uid = row["user_id"]
 
         try:
             bot.send_message(
-                target_id,
+                uid,
                 message_text
             )
 
             sent += 1
 
-        except Exception:
+        except Exception as e:
             failed += 1
+
+            with db_lock:
+                conn = db_connect()
+
+                conn.execute("""
+                    INSERT INTO broadcast_failures (
+                        job_id,
+                        user_id,
+                        error,
+                        created_at
+                    )
+                    VALUES (?, ?, ?, ?)
+                """, (
+                    job_id,
+                    uid,
+                    str(e)[:1000],
+                    utc_now()
+                ))
+
+                conn.commit()
+                conn.close()
+
+        if index % 10 == 0 or index == total:
+            try:
+                bot.send_message(
+                    status_chat_id,
+                    "📢 <b>Broadcast Progress</b>\n\n"
+                    f"📊 Total: {total}\n"
+                    f"✅ Sent: {sent}\n"
+                    f"❌ Failed: {failed}\n"
+                    f"📈 Progress: {index}/{total}"
+                )
+            except Exception:
+                pass
 
         time.sleep(0.05)
 
+    else:
+        status = "completed"
+
     with db_lock:
-        conn = db()
+        conn = db_connect()
 
         conn.execute("""
-            INSERT INTO broadcast_history(
-                admin_id,
-                message_text,
-                total,
-                sent,
-                failed
-            )
-            VALUES(?,?,?,?,?)
+            UPDATE broadcast_jobs
+            SET status=?,
+                sent=?,
+                failed=?,
+                finished_at=?
+            WHERE id=?
         """, (
-            admin_id,
-            message_text,
-            total,
+            status,
             sent,
-            failed
+            failed,
+            utc_now(),
+            job_id
         ))
 
         conn.commit()
         conn.close()
 
-    broadcast_state.pop(
-        admin_id,
-        None
-    )
-
     try:
         bot.send_message(
-            admin_chat_id,
-            "✅ <b>Broadcast Finished</b>\n\n"
-            f"👥 Total: {total}\n"
+            status_chat_id,
+            "📢 <b>Broadcast Finished</b>\n\n"
+            f"📊 Total: {total}\n"
             f"✅ Sent: {sent}\n"
-            f"❌ Failed: {failed}"
+            f"❌ Failed: {failed}\n"
+            f"📌 Status: {status}"
         )
     except Exception:
         pass
 
 
+# ============================================================
+# MAIN TEXT HANDLER
+# ============================================================
+
 @bot.message_handler(
-    func=lambda m:
-    is_admin(m.from_user.id)
-    and m.from_user.id in broadcast_state
-    and broadcast_state[m.from_user.id].get(
-        "waiting"
-    ) is True
+    content_types=["text"]
 )
-def broadcast_message(message):
-
+def text_handler(message):
     uid = message.from_user.id
+    text = (message.text or "").strip()
 
-    if message.text == "/cancel":
-        broadcast_state.pop(
-            uid,
-            None
-        )
+    try:
+        save_user(message.from_user)
+
+        if is_banned(uid):
+            bot.send_message(
+                message.chat.id,
+                tr(uid, "banned")
+            )
+            return
+
+        # -----------------------------
+        # ADMIN STATES
+        # -----------------------------
+
+        if is_admin(uid):
+
+            state = admin_states.get(uid)
+
+            if state == "add_giveaway":
+                if text.startswith("/"):
+                    return
+
+                code = create_giveaway(text)
+
+                admin_states.pop(uid, None)
+
+                bot.send_message(
+                    message.chat.id,
+                    "🎉 <b>Giveaway Created!</b>\n\n"
+                    f"🔑 Code:\n<code>{code}</code>\n\n"
+                    f"🎁 Reward:\n{text}",
+                    reply_markup=admin_keyboard()
+                )
+                return
+
+            if state == "direct_user_id":
+                try:
+                    target_id = int(text)
+
+                    admin_states[uid] = (
+                        "direct_message",
+                        target_id
+                    )
+
+                    bot.send_message(
+                        message.chat.id,
+                        "💬 এখন যে message পাঠাতে চান সেটি লিখুন।"
+                    )
+
+                except Exception:
+                    bot.send_message(
+                        message.chat.id,
+                        "❌ সঠিক User ID দিন।"
+                    )
+
+                return
+
+            if (
+                isinstance(state, tuple)
+                and state[0] == "direct_message"
+            ):
+                target_id = state[1]
+
+                try:
+                    bot.send_message(
+                        target_id,
+                        "📩 <b>Message from Admin</b>\n\n"
+                        + text
+                    )
+
+                    bot.send_message(
+                        message.chat.id,
+                        "✅ Message পাঠানো হয়েছে।"
+                    )
+
+                except Exception as e:
+                    bot.send_message(
+                        message.chat.id,
+                        "❌ Message পাঠানো যায়নি:\n"
+                        + str(e)[:500]
+                    )
+
+                admin_states.pop(uid, None)
+                return
+
+            if state == "broadcast":
+                if text == "/cancel":
+                    admin_states.pop(uid, None)
+                    broadcast_cancel_event.set()
+                    return
+
+                admin_states.pop(uid, None)
+
+                bot.send_message(
+                    message.chat.id,
+                    "📢 Broadcast শুরু হচ্ছে..."
+                )
+
+                thread = threading.Thread(
+                    target=run_broadcast,
+                    args=(
+                        uid,
+                        text,
+                        message.chat.id
+                    ),
+                    daemon=True
+                )
+
+                thread.start()
+                return
+
+        # -----------------------------
+        # USER REDEEM STATE
+        # -----------------------------
+
+        if user_states.get(uid) == "redeem":
+
+            user_states.pop(uid, None)
+
+            reward = redeem_code(
+                uid,
+                text
+            )
+
+            if reward is None:
+                bot.send_message(
+                    message.chat.id,
+                    tr(uid, "invalid_code")
+                )
+                return
+
+            bot.send_message(
+                message.chat.id,
+                tr(
+                    uid,
+                    "redeem_success",
+                    reward=reward
+                )
+            )
+            return
+
+        # -----------------------------
+        # NORMAL FALLBACK
+        # -----------------------------
+
+        if text.startswith("/"):
+            return
 
         bot.send_message(
             message.chat.id,
-            "❌ Broadcast cancelled.",
-            reply_markup=admin_keyboard()
+            tr(uid, "welcome"),
+            reply_markup=main_keyboard(uid)
         )
 
-        return
-
-    text = message.text or ""
-
-    broadcast_state[uid] = {
-        "waiting": False,
-        "running": True
-    }
-
-    bot.send_message(
-        message.chat.id,
-        "🚀 Broadcast started..."
-    )
-
-    thread = threading.Thread(
-        target=perform_broadcast,
-        args=(
-            uid,
-            text,
-            message.chat.id
-        ),
-        daemon=True
-    )
-
-    thread.start()
-
-
-# =========================================================
-# CANCEL
-# =========================================================
-
-@bot.message_handler(commands=["cancel"])
-def cancel_command(message):
-
-    if not is_admin(message.from_user.id):
-        return
-
-    admin_state.pop(
-        message.from_user.id,
-        None
-    )
-
-    broadcast_state.pop(
-        message.from_user.id,
-        None
-    )
-
-    bot.send_message(
-        message.chat.id,
-        "❌ Cancelled.",
-        reply_markup=admin_keyboard()
-    )
-
-
-# =========================================================
-# MAIN MENU
-# =========================================================
-
-@bot.message_handler(
-    func=lambda m:
-    is_admin(m.from_user.id)
-    and m.text == "🏠 Main Menu"
-)
-def main_menu_button(message):
-
-    bot.send_message(
-        message.chat.id,
-        tr(
-            message.from_user.id,
-            "welcome"
-        ),
-        reply_markup=main_keyboard(
-            message.from_user.id
-        )
-    )
-
-
-# =========================================================
-# USER -> ADMIN MESSAGE
-# =========================================================
-
-@bot.message_handler(
-    func=lambda m:
-    (
-        m.from_user.id != ADMIN_ID
-        and m.text
-        and not m.text.startswith("/")
-    )
-)
-def user_message_fallback(message):
-
-    uid = message.from_user.id
-
-    known_buttons = {
-        "🔑 কোড রিডিম",
-        "🔑 Redeem Code",
-        "⚙️ সেটিংস",
-        "⚙️ Settings",
-        "🎁 ডেইলি গিভঅ্যাওয়ে",
-        "🎁 Daily Giveaway",
-        "📊 আমার স্ট্যাটাস",
-        "📊 My Status",
-        "ℹ️ সাহায্য",
-        "ℹ️ Help"
-    }
-
-    if message.text in known_buttons:
-        return
-
-    save_user(message.from_user)
-
-    if is_banned(uid):
-        return
-
-    if not joined_all(uid):
-        bot.send_message(
-            message.chat.id,
-            tr(uid, "join_required"),
-            reply_markup=join_keyboard()
-        )
-        return
-
-    if ADMIN_ID:
-
-        username = (
-            f"@{message.from_user.username}"
-            if message.from_user.username
-            else "No username"
-        )
+    except Exception:
+        print("TEXT HANDLER ERROR:")
+        traceback.print_exc()
 
         try:
             bot.send_message(
-                ADMIN_ID,
-                "📩 <b>User Message</b>\n\n"
-                f"👤 {username}\n"
-                f"🆔 <code>{uid}</code>\n\n"
-                f"💬 {message.text}"
+                message.chat.id,
+                "⚠️ একটি সাময়িক সমস্যা হয়েছে। আবার চেষ্টা করুন।"
             )
+        except Exception:
+            pass
+
+
+# ============================================================
+# ADMIN -> USER REPLY / USER -> ADMIN SUPPORT
+# ============================================================
+
+@bot.message_handler(
+    func=lambda m:
+        m.chat.id != ADMIN_ID and
+        m.reply_to_message is not None and
+        m.reply_to_message.from_user is not None and
+        m.reply_to_message.from_user.id == ADMIN_ID
+)
+def user_reply_to_admin(message):
+    try:
+        bot.forward_message(
+            ADMIN_ID,
+            message.chat.id,
+            message.message_id
+        )
+    except Exception:
+        pass
+
+
+# ============================================================
+# TELEGRAM API VALIDATION
+# ============================================================
+
+def validate_telegram():
+    print()
+    print("Checking Telegram API...")
+
+    try:
+        me = bot.get_me()
+
+        print("Telegram API: OK")
+        print(
+            f"Bot: @{me.username} "
+            f"(ID: {me.id})"
+        )
+
+        return True
+
+    except Exception as e:
+        print()
+        print("!!! TELEGRAM API ERROR !!!")
+        print(repr(e))
+        print()
+
+        error_text = str(e)
+
+        if "401" in error_text:
+            print(
+                "CAUSE: BOT_TOKEN is invalid, "
+                "expired or revoked."
+            )
+
+        elif "409" in error_text:
+            print(
+                "CAUSE: Another instance of this bot "
+                "is already using getUpdates."
+            )
+
+        else:
+            print(
+                "CAUSE: Telegram API connection/configuration problem."
+            )
+
+        print("=" * 60)
+
+        return False
+
+
+# ============================================================
+# FLASK SERVER
+# ============================================================
+
+def run_flask():
+    try:
+        print(
+            f"Starting Flask on 0.0.0.0:{PORT}"
+        )
+
+        app.run(
+            host="0.0.0.0",
+            port=PORT,
+            debug=False,
+            use_reloader=False,
+            threaded=True
+        )
+
+    except Exception:
+        print("FLASK ERROR:")
+        traceback.print_exc()
+
+
+# ============================================================
+# TELEGRAM POLLING
+# ============================================================
+
+def run_polling():
+    print()
+    print("Preparing Telegram polling...")
+
+    try:
+        # Remove webhook before polling.
+        try:
+            bot.delete_webhook(
+                drop_pending_updates=True
+            )
+            print("Webhook removed successfully.")
         except Exception as e:
             print(
-                "User->Admin error:",
-                e
+                "Webhook removal warning:",
+                repr(e)
             )
 
+        # Validate token before polling.
+        if not validate_telegram():
+            print()
+            print(
+                "Bot polling NOT started because "
+                "Telegram API validation failed."
+            )
+            return
 
-# =========================================================
-# HEALTH
-# =========================================================
+        print()
+        print("Bot polling started...")
+        print("Waiting for Telegram updates...")
+        print("=" * 60)
 
-@bot.message_handler(commands=["health"])
-def health_command(message):
+        bot.infinity_polling(
+            timeout=30,
+            long_polling_timeout=30,
+            skip_pending=True,
+            allowed_updates=[
+                "message",
+                "callback_query"
+            ],
+            logger_level=20
+        )
 
-    if not is_admin(message.from_user.id):
-        return
+    except Exception as e:
+        print()
+        print("POLLING ERROR:")
+        print(repr(e))
+        traceback.print_exc()
 
-    bot.send_message(
-        message.chat.id,
-        "✅ Bot is running.\n"
-        "🌐 Health server is active."
-    )
-
-
-# =========================================================
-# START POLLING
-# =========================================================
-
-def start_bot():
-
-    print(
-        "======================================"
-    )
-    print(
-        "RAFIM GIVEAWAY BOT STARTING"
-    )
-    print(
-        "======================================"
-    )
-    print(
-        "Channel:",
-        CHANNEL_1
-    )
-    print(
-        "Group:",
-        GROUP_1
-    )
-    print(
-        "Admin:",
-        ADMIN_ID
-    )
-
-    while True:
+        # Do not silently pretend the bot is running.
+        # Retry only for temporary errors.
+        time.sleep(5)
 
         try:
-
-            print(
-                "Bot polling started..."
-            )
-
+            print("Retrying Telegram polling...")
             bot.infinity_polling(
                 timeout=30,
                 long_polling_timeout=30,
@@ -1677,25 +1955,36 @@ def start_bot():
                 allowed_updates=[
                     "message",
                     "callback_query"
-                ]
+                ],
+                logger_level=20
             )
 
-        except Exception as e:
-
-            print(
-                "Polling error:",
-                repr(e)
-            )
-
-            time.sleep(5)
+        except Exception:
+            print("SECOND POLLING ATTEMPT FAILED:")
+            traceback.print_exc()
 
 
-# =========================================================
-# MAIN
-# =========================================================
+# ============================================================
+# STARTUP
+# ============================================================
 
-if __name__ == "__main__":
+def main():
+    print()
+    print("=" * 60)
+    print("RAFIM GIVEAWAY BOT STARTING")
+    print("=" * 60)
 
+    # Database first.
+    try:
+        init_db()
+        print("Database: OK")
+    except Exception as e:
+        print("DATABASE ERROR:")
+        print(repr(e))
+        traceback.print_exc()
+        sys.exit(1)
+
+    # Start Flask in background.
     flask_thread = threading.Thread(
         target=run_flask,
         daemon=True
@@ -1703,4 +1992,16 @@ if __name__ == "__main__":
 
     flask_thread.start()
 
-    start_bot()
+    # Give Flask a moment to bind.
+    time.sleep(2)
+
+    # Telegram polling stays in main thread.
+    run_polling()
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
+
+if __name__ == "__main__":
+    main()
