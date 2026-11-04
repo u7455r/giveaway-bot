@@ -25,9 +25,9 @@ from flask import Flask
 # ENVIRONMENT
 # ============================================================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+BOT_TOKEN = os.getenv("8886219226:AAE5modsPJsbGK17JneyphHvujsposX6fc0", "").strip()
 
-ADMIN_ID_RAW = os.getenv("ADMIN_ID", "0").strip()
+ADMIN_ID_RAW = os.getenv("8298133943", "0").strip()
 
 try:
     ADMIN_ID = int(ADMIN_ID_RAW)
@@ -38,7 +38,7 @@ CHANNEL_1 = os.getenv("CHANNEL_1", "@bdgiveaways24").strip()
 GROUP_1 = os.getenv("GROUP_1", "@bdgivewaychat").strip()
 
 SUPPORT_USERNAME = (
-    os.getenv("SUPPORT_USERNAME", "rafimhossen")
+    os.getenv("SUPPORT_USERNAME", "@rafimhossen")
     .strip()
     .lstrip("@")
 )
